@@ -1,0 +1,27 @@
+# Sentience Governor — example profile for the v0.2.6 pulse showcase
+# (missing-intent case).
+#
+# This profile asks for intent declaration before the first mutating
+# operation. The matching trace in this directory deliberately omits
+# the INTENT_DECLARED event, so the wrapper fires POL-001 on the
+# first mutating SCOPE_ASSERTED. This is what a Claude Code-style
+# session looks like today: the surface does not expose an intent-
+# declaration primitive, so every mutating turn surfaces as
+# "undeclared."
+#
+# Drop a copy at ~/.sentience/profile.yaml to activate it for every
+# governed session on this machine.
+
+schema_version: 1
+
+session_intent:
+  required: true
+  demand_at: first_write
+
+task_boundary:
+  signals:
+    - read_to_write_transition
+
+high_consequence:
+  tools:
+    - "Bash:.*rm.*-rf.*"

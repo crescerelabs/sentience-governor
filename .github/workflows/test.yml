@@ -1,0 +1,44 @@
+name: test
+
+# The full offline test suite. Fast, no network, no credentials.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Matches requires-python = ">=3.10" and the declared classifiers
+        # in pyproject.toml. Keep the two in sync.
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # Explicit dependency install. The Makefile prefers an in-repo .venv
+      # and falls back to python3; CI has no .venv, so deps go to the
+      # runner's interpreter and `make test` resolves to that python3.
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev,mcp]"
+
+      - name: Run test suite
+        run: make test

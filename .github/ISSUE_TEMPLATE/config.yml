@@ -1,0 +1,15 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/crescerelabs/sentience-governor/security/advisories/new
+    about: >
+      Report privately. Do not open a public issue for a security report.
+      See SECURITY.md for what is in scope.
+  - name: Documentation
+    url: https://getsentience.ai/docs/
+    about: Installation, commands, and the governance model.
+  - name: Question or idea
+    url: https://github.com/crescerelabs/sentience-governor/discussions
+    about: >
+      Open-ended questions and proposals. Changes to governance semantics
+      should start here or as an issue, not as a pull request.

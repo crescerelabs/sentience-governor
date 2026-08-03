@@ -1,0 +1,58 @@
+# CODEOWNERS: trust-critical path routing
+#
+# Sentience produces evidence. The paths below decide what an event means,
+# what counts as a violation, and when enforcement fires. A quiet change to
+# any of them changes what a downstream operator, reviewer, or auditor is
+# looking at. They are maintainer-governed and need design agreement before
+# change.
+#
+# ---------------------------------------------------------------------------
+# ENFORCEMENT STATUS: read this before assuming a review is blocked
+# ---------------------------------------------------------------------------
+# "Require review from Code Owners" is NOT currently enabled as a required
+# check. The practical effect of this file today is auto-requested review and
+# an explicit statement of which paths need design agreement before change.
+#
+# What gates a merge today:
+#   1. Required CI (test suite + public-surface guard)
+#   2. Maintainer review against the stated acceptance criteria
+#
+# Only the maintainer merges into the protected branch, creates releases, or
+# publishes the package.
+#
+# See CONTRIBUTING.md, "Maintainer-governed changes".
+# ---------------------------------------------------------------------------
+
+# Default owner for anything not matched below.
+*                                       @rohynal
+
+# --- Event schema: field names and meanings ---
+/sentience_governor/schema/             @rohynal
+
+# --- Event construction: what actually gets written to the trace ---
+/sentience_governor/event_builder/      @rohynal
+
+# --- Governance profile: policy surface, reserved slots, on_match values ---
+/sentience_governor/profile/            @rohynal
+
+# --- Policy evaluation and violation reporting ---
+/sentience_governor/analyze/            @rohynal
+
+# --- Session identity and continuity: which events belong to which session ---
+/sentience_governor/session_manager/    @rohynal
+/sentience_governor/mcp_server/session_identity.py   @rohynal
+
+# --- Interception boundary: where governance is applied to a live agent ---
+/sentience_governor/wrapper/            @rohynal
+
+# --- Durability: the write path the documented fail-open conditions rest on ---
+/sentience_governor/sink/               @rohynal
+
+# --- Project governance, security posture, and release gating ---
+/SECURITY.md                            @rohynal
+/CONTRIBUTING.md                        @rohynal
+/CODE_OF_CONDUCT.md                     @rohynal
+/LICENSE                                @rohynal
+/.github/                               @rohynal
+/scripts/                               @rohynal
+/pyproject.toml                         @rohynal

@@ -1,0 +1,24 @@
+# Sentience Governor — example profile for the v0.2.6 pulse showcase
+# (clean-session case).
+#
+# This is a *permissive* profile: it asks for intent declaration once
+# per session and a single task-boundary signal. A well-behaved agent
+# running under this profile produces a trace with zero POL-* firings
+# and zero advisory flags beyond what the operator opted into.
+#
+# Drop a copy at ~/.sentience/profile.yaml to activate it for every
+# governed session on this machine.
+
+schema_version: 1
+
+session_intent:
+  required: true
+  demand_at: first_write
+
+task_boundary:
+  signals:
+    - read_to_write_transition
+
+high_consequence:
+  tools:
+    - "Bash:.*rm.*-rf.*"

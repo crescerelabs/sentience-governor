@@ -1,0 +1,45 @@
+SESSION: sess-b-001 | Agent: unscoped-agent-v1 | 2026-04-14T10:00:00.000Z
+
+[1] REGISTRATION          ⚠  Agent unscoped-agent-v1 (no version)
+    Policy violation: POL-002
+    Consequence: This session would have been blocked at the central server. Unregistered agents cannot access tools.
+    → Fix: Register agent before session start (POL-002)
+[2] INTENT                ⚠  Objective: '[none]'  source=none
+    → Fix: Declare intent before executing mutating operations (POL-001)
+[3] SCOPE                 ⚠  WRITE crm.update_record → crm
+    Policy violation: POL-001
+    Consequence: This WRITE operation would have been blocked. The agent must declare intent before executing mutating operations.
+    → Fix: Declare intent before executing mutating operations (POL-001)
+    → Fix: Ensure scope matches declared intent (POL-001)
+[4] CONTEXT               ⚠  classifications=[unclassified]  source=unclassified  tokens=1100
+    Policy violation: POL-003
+    Consequence: Downstream tool calls requiring classified context would have been restricted until classification was provided.
+    → Fix: Vendor should tag tool responses with classification metadata (POL-003)
+[5] CONTEXT               ⚠  classifications=[confidential]  source=explicit  tokens=1800
+    Policy violation: POL-005
+    Consequence: This context escalation would have triggered a boundary check. The session would have been paused pending authorization review.
+    → Fix: Provide explicit authorization before escalating context sensitivity (POL-005)
+[6] MEMORY                ⚠  write_to_persistence_target → vector_db  classification=unclassified  retention=null
+    Policy violation: POL-004
+    Consequence: This write would have been blocked. Memory writes require both classification and a retention policy.
+    → Fix: Memory writes must include classification and retention policy (POL-004)
+
+────────────────────────────────────────────────────────────
+SESSION SUMMARY — sess-b-001
+
+Agent: unscoped-agent-v1 | Topology: vendor_managed
+
+Events intercepted:    6
+Policy violations:     5  (POL-001, POL-002, POL-003, POL-004, POL-005)
+Actions that would have been blocked:    2
+Memory writes that would have been rejected:    1
+Intent signal quality: MISSING — no intent signal detected
+
+→ Declare intent before executing mutating operations (POL-001)
+→ Register agent before session start (POL-002)
+→ Vendor should tag tool responses with classification metadata (POL-003)
+→ Memory writes must include classification and retention policy (POL-004)
+→ Provide explicit authorization before escalating context sensitivity (POL-005)
+
+Real-time enforcement of these policies is on the Sentience roadmap.
+

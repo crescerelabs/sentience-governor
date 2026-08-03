@@ -1,0 +1,39 @@
+# Sentience Governor — example governance profile (v0.2.5)
+#
+# This is the operator-authored expression of "what the agent must
+# do" before it touches anything that matters. It pairs with the
+# CLAUDE.md recipe in this directory: the agent reads CLAUDE.md and
+# learns the shape of the expectations; the wrapper reads this file
+# and enforces the corresponding observability signals.
+#
+# Drop a copy at ~/.sentience/profile.yaml to activate it for every
+# governed session on this machine.
+
+schema_version: 1
+
+session_intent:
+  # The agent must declare its operational intent before the first
+  # mutating operation. `first_write` fires POL-001 exactly once per
+  # session (rather than per-event) — enough to surface drift, not
+  # enough to drown the trace in repeated violations.
+  required: true
+  demand_at: first_write
+
+task_boundary:
+  # When any of these signals fires, the wrapper surfaces a
+  # TASK_BOUNDARY_CROSSED advisory flag — letting the analyzer (and
+  # the operator) see the moment the agent shifted contexts.
+  signals:
+    - dir_change
+    - file_type_shift
+    - read_to_write_transition
+  dir_change_depth: 2
+
+high_consequence:
+  # Tool:target patterns that should always surface, regardless of
+  # task boundaries. These regexes match against
+  # `<tool_id>:<target_system>`, evaluated case-sensitively.
+  tools:
+    - "Bash:.*rm.*-rf.*"
+    - "Bash:.*git.*push.*--force.*"
+    - "fs.write:.*\\.env.*"

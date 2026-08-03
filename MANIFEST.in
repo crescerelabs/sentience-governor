@@ -1,0 +1,12 @@
+include LICENSE
+include README.md
+include CHANGELOG.md
+include pyproject.toml
+recursive-include sentience_governor *.py
+recursive-include sentience_governor *.jsonl
+recursive-include sentience_governor/data/skills *.md
+recursive-include sentience_sync *.py
+prune tests
+prune examples
+prune docs
+prune server

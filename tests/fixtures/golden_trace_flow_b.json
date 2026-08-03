@@ -1,0 +1,136 @@
+[
+  {
+    "event_id": "evt-b-001",
+    "event_type": "AGENT_REGISTERED",
+    "session_id": "sess-b-001",
+    "event_sequence_number": 1,
+    "previous_event_id": null,
+    "agent_id": "unscoped-agent-v1",
+    "deployment_mode": "vendor_managed",
+    "timestamp_utc": "2026-04-14T10:00:00.000Z",
+    "primitive": "REGISTRATION",
+    "payload": {
+      "agent_id": "unscoped-agent-v1",
+      "agent_version": null,
+      "vendor_id": null,
+      "deployment_mode": "vendor_managed",
+      "declared_capabilities": [],
+      "owner_claim": null,
+      "policy_context": null
+    },
+    "advisory_flags": ["AGENT_UNREGISTERED"],
+    "policy_violations": ["POL-002"],
+    "simulated_consequence": "This session would have been blocked at the central server. Unregistered agents cannot access tools.",
+    "pass_through": true
+  },
+  {
+    "event_id": "evt-b-002",
+    "event_type": "INTENT_DECLARED",
+    "session_id": "sess-b-001",
+    "event_sequence_number": 2,
+    "previous_event_id": "evt-b-001",
+    "agent_id": "unscoped-agent-v1",
+    "deployment_mode": "vendor_managed",
+    "timestamp_utc": "2026-04-14T10:00:00.121Z",
+    "primitive": "INTENT",
+    "payload": {
+      "stated_objective": null,
+      "intent_source": "none",
+      "intent_confidence": "unknown",
+      "authorization_claim": null,
+      "session_scope_hint": []
+    },
+    "advisory_flags": ["INTENT_MISSING"],
+    "policy_violations": [],
+    "simulated_consequence": null,
+    "pass_through": true
+  },
+  {
+    "event_id": "evt-b-003",
+    "event_type": "SCOPE_ASSERTED",
+    "session_id": "sess-b-001",
+    "event_sequence_number": 3,
+    "previous_event_id": "evt-b-002",
+    "agent_id": "unscoped-agent-v1",
+    "deployment_mode": "vendor_managed",
+    "timestamp_utc": "2026-04-14T10:00:00.318Z",
+    "primitive": "SCOPE",
+    "payload": {
+      "tool_id": "crm.update_record",
+      "asserted_permissions": ["write"],
+      "target_system": "crm",
+      "operation_type": "WRITE"
+    },
+    "advisory_flags": ["SCOPE_OPERATION_UNEXPECTED", "SCOPE_INTENT_MISMATCH"],
+    "policy_violations": ["POL-001"],
+    "simulated_consequence": "This WRITE operation would have been blocked. The agent must declare intent before executing mutating operations.",
+    "pass_through": true
+  },
+  {
+    "event_id": "evt-b-004",
+    "event_type": "CONTEXT_SNAPSHOT",
+    "session_id": "sess-b-001",
+    "event_sequence_number": 4,
+    "previous_event_id": "evt-b-003",
+    "agent_id": "unscoped-agent-v1",
+    "deployment_mode": "vendor_managed",
+    "timestamp_utc": "2026-04-14T10:00:00.729Z",
+    "primitive": "CONTEXT",
+    "payload": {
+      "data_classifications": [],
+      "classification_source": "unclassified",
+      "provenance": ["crm", "user_input"],
+      "retention_flags": [],
+      "context_size_tokens": 1100
+    },
+    "advisory_flags": ["CONTEXT_UNCLASSIFIED"],
+    "policy_violations": ["POL-003"],
+    "simulated_consequence": "Downstream tool calls requiring classified context would have been restricted until classification was provided.",
+    "pass_through": true
+  },
+  {
+    "event_id": "evt-b-005",
+    "event_type": "CONTEXT_SNAPSHOT",
+    "session_id": "sess-b-001",
+    "event_sequence_number": 5,
+    "previous_event_id": "evt-b-004",
+    "agent_id": "unscoped-agent-v1",
+    "deployment_mode": "vendor_managed",
+    "timestamp_utc": "2026-04-14T10:00:01.103Z",
+    "primitive": "CONTEXT",
+    "payload": {
+      "data_classifications": ["confidential"],
+      "classification_source": "explicit",
+      "provenance": ["hr_system"],
+      "retention_flags": ["must-not-persist"],
+      "context_size_tokens": 1800
+    },
+    "advisory_flags": ["SENSITIVITY_ESCALATION"],
+    "policy_violations": ["POL-005"],
+    "simulated_consequence": "This context escalation would have triggered a boundary check. The session would have been paused pending authorization review.",
+    "pass_through": true
+  },
+  {
+    "event_id": "evt-b-006",
+    "event_type": "MEMORY_WRITE_ATTEMPT",
+    "session_id": "sess-b-001",
+    "event_sequence_number": 6,
+    "previous_event_id": "evt-b-005",
+    "agent_id": "unscoped-agent-v1",
+    "deployment_mode": "vendor_managed",
+    "timestamp_utc": "2026-04-14T10:00:01.587Z",
+    "primitive": "MEMORY",
+    "payload": {
+      "write_type": "write_to_persistence_target",
+      "detection_mechanism": "tool_metadata",
+      "target_store": "vector_db",
+      "write_classification": "unclassified",
+      "write_size_tokens": 1500,
+      "retention_requested": null
+    },
+    "advisory_flags": ["MEMORY_WRITE_UNCLASSIFIED", "MEMORY_WRITE_CANDIDATE"],
+    "policy_violations": ["POL-004"],
+    "simulated_consequence": "This write would have been blocked. Memory writes require both classification and a retention policy.",
+    "pass_through": true
+  }
+]

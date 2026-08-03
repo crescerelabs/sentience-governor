@@ -1,0 +1,96 @@
+name: Bug report
+description: Something Sentience recorded, evaluated, or blocked incorrectly.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting.
+
+        **Before you paste a trace:** governance traces can contain prompts,
+        tool arguments, and filesystem paths from real work. Redact first, and
+        never attach a trace from a production or client system.
+
+        Found a security issue? Do not file it here. See
+        [SECURITY.md](https://github.com/crescerelabs/sentience-governor/blob/main/SECURITY.md).
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What did Sentience do, and what did you expect instead?
+      placeholder: |
+        Expected: a scope violation on the write to ../secrets.env
+        Actual:   the turn was recorded clean
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction
+      description: >
+        The smallest sequence that shows it. A script is ideal. If it only
+        reproduces inside a live agent session, say so and describe the turn.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: harness
+    attributes:
+      label: Harness
+      description: How is Sentience attached to the agent?
+      options:
+        - Claude Code hook
+        - MCP server
+        - LangChain / LangGraph callback
+        - wrap_mcp_client
+        - Direct library use
+        - CLI only (sentience / sentience-cli)
+        - Other (describe below)
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Sentience version
+      description: "`sentience --version`, or the installed distribution version."
+      placeholder: "0.3.0"
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: Python and OS
+      placeholder: "Python 3.12.4, macOS 15.3"
+    validations:
+      required: true
+
+  - type: textarea
+    id: trace
+    attributes:
+      label: Trace excerpt
+      description: >
+        The most useful thing you can attach. The governance events immediately
+        around the problem, including the session start and any intent
+        declaration. **Redact before pasting.**
+      render: text
+
+  - type: textarea
+    id: profile
+    attributes:
+      label: Governance profile
+      description: Your profile file, if you are using a non-default one.
+      render: yaml
+
+  - type: checkboxes
+    id: hygiene
+    attributes:
+      label: Confirmations
+      options:
+        - label: I redacted anything sensitive from the trace and logs above.
+          required: true
+        - label: This is not a security vulnerability report.
+          required: true

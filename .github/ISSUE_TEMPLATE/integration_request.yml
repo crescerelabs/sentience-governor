@@ -1,0 +1,57 @@
+name: Integration or harness support
+description: Sentience does not cover the agent framework, harness, or transport you use.
+labels: ["integration"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Integrations are the contribution we most want, and the area the
+        project is deliberately thinnest in. Filing this is useful even if you
+        do not intend to build it yourself.
+
+  - type: input
+    id: target
+    attributes:
+      label: What should Sentience attach to
+      placeholder: "OpenAI Agents SDK / Cursor / a custom in-house harness"
+    validations:
+      required: true
+
+  - type: textarea
+    id: interception
+    attributes:
+      label: Where is the interception point
+      description: >
+        The hook, callback, or middleware where a tool call can be observed
+        before it executes. A link to that API's documentation is ideal. This
+        is usually the whole problem: if there is no such point, say so.
+    validations:
+      required: true
+
+  - type: textarea
+    id: session
+    attributes:
+      label: How is a session identified
+      description: >
+        Does the harness expose a stable session or conversation ID? Does it
+        survive resumption? Sentience needs to know which events belong
+        together, and this is where most integrations get hard.
+
+  - type: textarea
+    id: usecase
+    attributes:
+      label: What are you trying to govern
+      description: >
+        What the agent does, and what you need evidence of. Helps us tell a
+        general integration from a one-off adapter.
+
+  - type: dropdown
+    id: contributing
+    attributes:
+      label: Would you be up for building it
+      options:
+        - "Yes, with guidance on where to start"
+        - "Maybe, depending on scope"
+        - "No, filing so it is on the record"
+    validations:
+      required: true

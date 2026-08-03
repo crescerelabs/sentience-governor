@@ -1,0 +1,112 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sentience-governor"
+version = "0.3.0"
+description = "Local-first governance for AI agents: hold each agent to the intent and scope it declares, keep a verifiable record of what it did, and flag anything out of bounds. Callable by Claude via an opt-in MCP server."
+requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [
+    {name = "Crescere Labs, Inc.", email = "operators@crescerelabs.com"},
+]
+readme = "README.md"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: Security",
+    "Topic :: System :: Monitoring",
+    "Operating System :: OS Independent",
+]
+keywords = [
+    "ai",
+    "agent",
+    "governance",
+    "observability",
+    "policy",
+    "llm",
+    "mcp",
+    "langchain",
+    "claude-code",
+    "trace",
+    "audit",
+]
+dependencies = [
+    "pydantic>=2.0",
+    "PyYAML>=6.0",
+]
+
+[project.urls]
+Homepage = "https://getsentience.ai"
+Documentation = "https://getsentience.ai/docs/"
+Changelog = "https://getsentience.ai/docs/changelog/"
+Repository = "https://github.com/crescerelabs/sentience-governor"
+Issues = "https://github.com/crescerelabs/sentience-governor/issues"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+]
+# v0.3.0: the MCP server (governance-as-tools, `sentience-mcp-server`) needs
+# the MCP SDK. Optional so the core install stays lean; installed via
+# `pip install "sentience-governor[mcp]"`.
+mcp = [
+    "mcp>=1.0",
+]
+# The [demo] group is a convenience bundle for source-install users who
+# want to run the scripts in examples/. It is NOT a product dependency:
+# examples/ is excluded from the delivery package (see
+# [tool.setuptools.packages.find] below), so these extras are only
+# useful when paired with a source checkout. PyPI users never receive
+# the demo scripts or need these packages at all.
+#
+# When a new demo in examples/ needs a new runtime library, add it here.
+# That way `pip install -e ".[demo]"` is always sufficient to run every
+# demo in the repo.
+demo = [
+    "anthropic>=0.40",           # used by claude_demo.py and claude_airtable_demo.py
+    "pyairtable>=2.0",           # used by claude_airtable_demo.py
+    "langchain-anthropic>=0.3",  # used by claude_langchain_demo.py
+    "langchain-core>=0.3",       # used by claude_langchain_demo.py
+]
+
+[project.scripts]
+sentience-cli = "sentience_governor.cli.viewer:main"
+sentience-sync = "sentience_sync.cli:main"
+sentience-claude-code-hook = "sentience_governor.wrapper.claude_code_hook:run_hook"
+sentience = "sentience_governor.cli.ux:main"
+sentience-mcp-server = "sentience_governor.mcp_server.server:main"
+
+[tool.setuptools.package-data]
+# Bundle the closed-loop showcase trace so `sentience analyze
+# undeclared-intent --showcase` renders real token data on a fresh
+# install, even before the operator has wired token capture (F-V5).
+# data/skills/*/SKILL.md: the v0.2.7 Claude Code slash-command skills
+# installed by `sentience init claude-code` (R4 — must ship in wheel).
+sentience_governor = ["data/showcase/*.jsonl", "data/skills/*/SKILL.md"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+# include is an allowlist: only sentience_governor and sentience_sync are
+# shipped in the wheel. examples/ and tests/ are intentionally NOT part of
+# the delivery package — examples/ contains demo scripts (e.g. claude_demo.py)
+# that are not product surface, and tests/ is the test suite. The exclude
+# below is belt-and-suspenders: even if the include allowlist is ever
+# loosened, these directories must remain out of the package.
+include = ["sentience_governor*", "sentience_sync*"]
+exclude = ["examples*", "tests*", "docs*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+# Scope default discovery to the library test suite.
+testpaths = ["tests"]

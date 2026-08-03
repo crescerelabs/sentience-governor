@@ -1,0 +1,38 @@
+name: public-surface
+
+# Standing guard against private-repository references re-entering the public
+# tree: internal doc paths, internal-only directories, and absolute local
+# filesystem paths.
+#
+# This repository was created as a clean public surface. That property is not
+# self-maintaining: a copied docstring or a pasted path reintroduces it in one
+# commit. This job is the check that keeps it true.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: public-surface-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # The guard is dependency-free by design: standard library only, so it
+      # keeps working even when an install step is broken. No install step
+      # here is deliberate, not an omission.
+      - name: Check public surface
+        run: python3 scripts/check_public_surface.py --mode=git

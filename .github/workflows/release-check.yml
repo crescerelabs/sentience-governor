@@ -1,0 +1,51 @@
+name: release-check
+
+# The mechanically-checkable release gates (scripts/release_check.py):
+# version consistency, docs currency, test suite, wheel build, twine check,
+# and wheel hygiene.
+#
+# Runs on version tags only. This job does NOT publish anything: there is no
+# PyPI credential in this workflow and none is needed. Publication remains a
+# deliberate operator action.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # release_check compares against repository history; a shallow
+          # clone can make version and docs gates read the wrong state.
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Gates 13-16 shell out to `python -m build` and `twine check`, so
+      # both must be present in addition to the project's own dev deps.
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev,mcp]"
+          python -m pip install build twine
+
+      - name: Run release gates
+        run: make release-check
+
+      - name: Upload built distributions
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ github.ref_name }}
+          path: dist/
+          if-no-files-found: warn
+          retention-days: 14

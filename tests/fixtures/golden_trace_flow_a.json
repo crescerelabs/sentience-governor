@@ -1,0 +1,114 @@
+[
+  {
+    "event_id": "evt-a-001",
+    "event_type": "AGENT_REGISTERED",
+    "session_id": "sess-a-001",
+    "event_sequence_number": 1,
+    "previous_event_id": null,
+    "agent_id": "reporting-agent-v1",
+    "deployment_mode": "vendor_managed",
+    "timestamp_utc": "2026-04-14T09:00:00.000Z",
+    "primitive": "REGISTRATION",
+    "payload": {
+      "agent_id": "reporting-agent-v1",
+      "agent_version": "1.0.4",
+      "vendor_id": "acme-analytics",
+      "deployment_mode": "vendor_managed",
+      "declared_capabilities": ["crm.read", "report_db.write"],
+      "owner_claim": "user_123",
+      "policy_context": null
+    },
+    "advisory_flags": [],
+    "policy_violations": [],
+    "simulated_consequence": null,
+    "pass_through": true
+  },
+  {
+    "event_id": "evt-a-002",
+    "event_type": "INTENT_DECLARED",
+    "session_id": "sess-a-001",
+    "event_sequence_number": 2,
+    "previous_event_id": "evt-a-001",
+    "agent_id": "reporting-agent-v1",
+    "deployment_mode": "vendor_managed",
+    "timestamp_utc": "2026-04-14T09:00:00.183Z",
+    "primitive": "INTENT",
+    "payload": {
+      "stated_objective": "Generate customer usage report for Q1 2026",
+      "intent_source": "explicit",
+      "intent_confidence": "explicit",
+      "authorization_claim": "user_123",
+      "session_scope_hint": ["crm.read", "report_db.write"]
+    },
+    "advisory_flags": [],
+    "policy_violations": [],
+    "simulated_consequence": null,
+    "pass_through": true
+  },
+  {
+    "event_id": "evt-a-003",
+    "event_type": "SCOPE_ASSERTED",
+    "session_id": "sess-a-001",
+    "event_sequence_number": 3,
+    "previous_event_id": "evt-a-002",
+    "agent_id": "reporting-agent-v1",
+    "deployment_mode": "vendor_managed",
+    "timestamp_utc": "2026-04-14T09:00:00.412Z",
+    "primitive": "SCOPE",
+    "payload": {
+      "tool_id": "crm.fetch_usage",
+      "asserted_permissions": ["read"],
+      "target_system": "crm",
+      "operation_type": "READ"
+    },
+    "advisory_flags": [],
+    "policy_violations": [],
+    "simulated_consequence": null,
+    "pass_through": true
+  },
+  {
+    "event_id": "evt-a-004",
+    "event_type": "CONTEXT_SNAPSHOT",
+    "session_id": "sess-a-001",
+    "event_sequence_number": 4,
+    "previous_event_id": "evt-a-003",
+    "agent_id": "reporting-agent-v1",
+    "deployment_mode": "vendor_managed",
+    "timestamp_utc": "2026-04-14T09:00:00.891Z",
+    "primitive": "CONTEXT",
+    "payload": {
+      "data_classifications": ["internal"],
+      "classification_source": "vendor",
+      "provenance": ["crm"],
+      "retention_flags": ["may-persist"],
+      "context_size_tokens": 1200
+    },
+    "advisory_flags": [],
+    "policy_violations": [],
+    "simulated_consequence": null,
+    "pass_through": true
+  },
+  {
+    "event_id": "evt-a-005",
+    "event_type": "MEMORY_WRITE_ATTEMPT",
+    "session_id": "sess-a-001",
+    "event_sequence_number": 5,
+    "previous_event_id": "evt-a-004",
+    "agent_id": "reporting-agent-v1",
+    "deployment_mode": "vendor_managed",
+    "timestamp_utc": "2026-04-14T09:00:01.204Z",
+    "primitive": "MEMORY",
+    "payload": {
+      "write_type": "explicit_persist",
+      "detection_mechanism": null,
+      "target_store": "report_db",
+      "write_classification": "internal",
+      "write_size_tokens": 800,
+      "retention_requested": "30_days"
+    },
+    "advisory_flags": [],
+    "policy_violations": [],
+    "simulated_consequence": null,
+    "pass_through": true
+  }
+]

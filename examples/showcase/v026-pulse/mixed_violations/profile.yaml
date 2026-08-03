@@ -1,0 +1,31 @@
+# Sentience Governor — example profile for the v0.2.6 pulse showcase
+# (mixed-violations case).
+#
+# This is a tighter profile: it asks for intent declaration, declares
+# three task-boundary signals, classifies sensitive directories as
+# high-consequence, and flags writes to .env files. The matching
+# trace fires several distinct POL-* rules across multiple turns —
+# the case where pulse's per-rule prioritization signal becomes
+# visible.
+#
+# Drop a copy at ~/.sentience/profile.yaml to activate it for every
+# governed session on this machine.
+
+schema_version: 1
+
+session_intent:
+  required: true
+  demand_at: first_write
+
+task_boundary:
+  signals:
+    - dir_change
+    - file_type_shift
+    - read_to_write_transition
+  dir_change_depth: 2
+
+high_consequence:
+  tools:
+    - "Bash:.*rm.*-rf.*"
+    - "Bash:.*git.*push.*--force.*"
+    - "fs.write:.*\\.env.*"

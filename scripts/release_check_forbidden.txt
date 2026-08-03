@@ -1,0 +1,19 @@
+# release_check gate-10 forbidden-surface patterns (one regex per line).
+#
+# A match in user-facing docs (README.md, userdocs/, docs/website/) or build
+# tooling (Makefile, scripts/) FAILS gate 10 — UNLESS the line is removal/sunset
+# context (see LINE_ALLOW in release_check.py: sunset|removed|no longer|
+# deprecat|former). changelog files are exempt entirely (historical record).
+#
+# Update this file each release when a surface is removed or renamed: add the
+# patterns that must no longer appear as an *active* feature.
+#
+# --- v0.2.8.3: Sync cloud telemetry sunset ---
+sentience-sync (init|register|run|status|aggregate|update-check)
+Sentience Cloud
+aggregated rule-fire counts
+aggregated counts
+cloud bridge
+cloud-side telemetry
+sync-state\.json
+installation_secret
