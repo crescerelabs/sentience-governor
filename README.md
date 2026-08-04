@@ -17,6 +17,12 @@ happened.
 
 No account, no API key. By default, your traces stay on your machine.
 
+![Sentience Governor: an agent's declared intent on the left, its runtime actions on the right, each marked within scope, outside scope, or a policy violation, with token spend attributed to each action](https://raw.githubusercontent.com/crescerelabs/sentience-governor/main/docs/assets/demo.gif)
+
+*Illustrative. Sentience records and evaluates a session, then reports on it;
+the open-source release does not adjudicate or block actions as they happen.
+For real output, see [See it work](#see-it-work) below.*
+
 ---
 
 ## Quickstart
@@ -50,9 +56,8 @@ pipx install and a virtualenv install.
 **Upgrade / remove:** `pipx upgrade sentience-governor`,
 `pipx uninstall sentience-governor`.
 
-Installs `sentience`, `sentience-cli`, `sentience-claude-code-hook`, and
-`sentience-mcp-server`. A fifth, `sentience-sync`, is a sunset stub that only
-prints a notice and will be removed in a future release.
+Installs four commands: `sentience`, `sentience-cli`,
+`sentience-claude-code-hook`, and `sentience-mcp-server`.
 
 </details>
 
@@ -80,18 +85,6 @@ Undeclared turns
 The session is synthesized and shipped with the package. The analyzer, the
 policy evaluation, and the attribution are the same ones that run against your
 own captured sessions.
-
-<!-- DEMO GIF SLOT: the asset lands separately and does not block this file.
-     Inserting it HERE, above the text output, is a pre-authorised edit: it
-     needs no new README review round. Any other change to this file does.
-     Do NOT replace the text output with the GIF: the text is what works on
-     PyPI, in search, for screen readers, and for copy-paste.
-     Target: 20s, terminal only. `sentience init claude-code`, a short Claude
-     Code session that drifts, then `/sentience-pulse` showing the violation.
-     Keep it under 3MB so it plays inline on GitHub.
-     MUST use an absolute raw URL, not a repo-relative path, because this
-     README is also the PyPI description:
-       ![demo](https://raw.githubusercontent.com/crescerelabs/sentience-governor/main/docs/assets/demo.gif) -->
 
 ---
 

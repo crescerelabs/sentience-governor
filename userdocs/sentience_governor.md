@@ -25,7 +25,7 @@
 
 ## 1. What the Governor is
 
-Sentience Governor is a Python library that wraps an agent's execution boundary and produces a structured trace of what the agent did. It's the open-tier (free, source-installed, no account, no network calls) implementation of the broader Sentience governance model.
+Sentience Governor is a Python library that wraps an agent's execution boundary and produces a structured trace of what the agent did. It's the open-tier (free, source-installed, no account, local-first by default) implementation of the broader Sentience governance model.
 
 The package ships:
 
@@ -35,14 +35,14 @@ The package ships:
 - Three **sinks** for persisting events: stdout, file, and local HTTP
 - A **CLI viewer** (`sentience-cli`) for reading the traces back
 
-Everything lives in process. The runtime makes no outbound network calls.
+Everything lives in process. Governance runs with the network off; the two network-capable paths (an operator-configured sink, and the one-time launch-list prompt) are opt-in and neither is on the governance path.
 
-`sentience-sync` was the experimental cloud-telemetry CLI; it was **sunset in v0.2.8.3**. Sentience Governor is local-first — the command now prints a local-first notice. See [`sentience_sync.md`](./sentience_sync.md).
+`sentience-sync` was the experimental cloud-telemetry CLI. It was **sunset in v0.2.8.3** and the command was **removed in v0.3.0.1**.
 
 ### Mental model
 
 - The Governor sits at the execution boundary.
-- It observes every tool call.
+- It captures supported agent actions at the execution boundary.
 - It produces a structured trace — it does not enforce.
 
 ## 2. What problem it solves
@@ -469,7 +469,7 @@ The middleware is **observe-only in v0** — it never blocks, never modifies too
 
 ## 7. Integration: Claude Code sessions
 
-Claude Code is a coding-agent runtime that exposes a hook system on every tool invocation (`Bash`, `Edit`, `Write`, `Read`, `Grep`, `Glob`, `WebFetch`, `WebSearch`, and every `mcp__<server>__<tool>`). The Governor ships an adapter that plugs into that hook system so every tool call in every Claude Code session becomes a governance event — without any code changes to your agent.
+Claude Code is a coding-agent runtime that exposes a hook system on every tool invocation (`Bash`, `Edit`, `Write`, `Read`, `Grep`, `Glob`, `WebFetch`, `WebSearch`, and every `mcp__<server>__<tool>`). The Governor ships an adapter that plugs into that hook system so supported tool calls in a Claude Code session become a governance event — without any code changes to your agent.
 
 **This is the lowest-friction Governor integration.** One command to wire it, one install. No imports, no wrapper construction, no `SessionManager` setup.
 
@@ -543,7 +543,7 @@ The `SessionEnd` hook (v0.2.6.1+) is what captures per-turn token burn — see [
 
 </details>
 
-Now run Claude Code normally. Every tool call produces governance events. By default the hook writes **one file per Claude Code session** under `~/.sentience/traces/claude-code/`:
+Now run Claude Code normally. Supported tool calls produce governance events. By default the hook writes **one file per Claude Code session** under `~/.sentience/traces/claude-code/`:
 
 ```
 ~/.sentience/traces/claude-code/
@@ -1700,7 +1700,12 @@ local, no HTTP, no auth**, and **never registered by default**.
 Install the server dependency and register it per project:
 
 ```bash
+# virtualenv / pip
 pip install "sentience-governor[mcp]"
+
+# pipx-managed install (ambient pip cannot reach the pipx venv)
+pipx install --force "sentience-governor[mcp]"
+
 sentience init claude-code --mcp     # writes .mcp.json + shows a consent notice
 ```
 
@@ -1799,10 +1804,19 @@ The runtime is intentionally synchronous. Async sinks introduce ordering ambigui
 
 This list exists so you don't form wrong expectations:
 
+- **Declared intent is untrusted input.** Sentience can identify when captured
+  actions diverge from what an agent declared. It cannot determine whether the
+  declaration itself was truthful or complete, or infer the agent's underlying
+  motives. Recording an unsafe action correctly does not make the action safe or
+  the agent trustworthy.
+- **Governs supported agent actions, not model behavior.** It evaluates
+  observable agent actions in business and operational workflows. It does not
+  detect bias, toxicity, hallucinations, harmful content, or other
+  model-output and content-safety issues.
 - **Does not block agent execution.** Ever. Under any condition. The Governor is observational by design.
 - **Does not modify tool calls or results.** It observes, records, and passes through.
-- **Does not send telemetry, licensing checks, or any data anywhere.** The runtime makes zero outbound network calls. (The experimental `sentience-sync` cloud-telemetry CLI was sunset in v0.2.8.3 — Sentience is local-first; see [`sentience_sync.md`](./sentience_sync.md).)
-- **Does not persist any state across sessions.** The in-process cache is per-session and goes away when the session ends.
+- **Does not send telemetry, licensing checks, or usage data anywhere.** Governance runs with the network off. Two network-capable paths exist and neither is on the governance path: an optional sink that posts to an operator-configured URL, and a one-time launch-list prompt that sends an email address only if the operator enters one.
+- **Does not aggregate governance state across sessions, machines, or a hosted plane.** The in-process cache is per-session and goes away when the session ends. Traces, reports, the profile and first-run state do persist on disk under `~/.sentience/`.
 - **Does not infer or guess classifications.** If you don't supply a `classification_hook`, classifications are empty. "Unclassified" means unclassified — no fabricated metadata.
 - **Does not require a Sentience account, API key, or network connection.** Python is the entire dependency footprint.
 - **Does not enforce policies.** Rules are evaluated and surfaced; nothing is blocked. Real enforcement is a paid control-plane capability.
@@ -2038,4 +2052,4 @@ If you want explicit visibility into failed tool calls in the trace, that's trac
 
 ---
 
-For more depth: [`sentience_sync.md`](./sentience_sync.md) is the sunset note for the removed cloud-telemetry CLI; [`../examples/README.md`](../examples/README.md) covers the runnable demo against real Claude.
+For more depth: [`../examples/README.md`](../examples/README.md) covers the runnable demo against real Claude.

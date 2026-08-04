@@ -325,16 +325,23 @@ def declare_intent_payload(
 def build_server() -> Any:
     """Construct the FastMCP server with the CP1 tool set.
 
-    Requires the optional ``mcp`` dependency; raises SystemExit with an
-    install hint if it is missing.
+    Requires the optional ``mcp`` dependency at a supported version. Raises
+    SystemExit (non-zero) with a remediation hint when it is absent **or**
+    installed at an unsupported version; the two are reported differently.
     """
     try:
         from mcp.server.fastmcp import FastMCP
-    except ImportError as exc:  # pragma: no cover - exercised via install hint
-        raise SystemExit(
-            "The Sentience MCP server requires the optional 'mcp' dependency. "
-            'Install it with: pip install "sentience-governor[mcp]"'
-        ) from exc
+    except ImportError as exc:
+        # This import fails for two different reasons, and conflating them was
+        # the v0.3.0 defect: a user with an unsupported `mcp` installed was
+        # told to install `mcp`, got "already satisfied", and learned nothing.
+        # install_hint decides which state applies and prints the remediation
+        # that matches how this interpreter was installed.
+        from sentience_governor.mcp_server.install_hint import (
+            import_failure_message,
+        )
+
+        raise SystemExit(import_failure_message()) from exc
 
     server = FastMCP(SERVER_NAME)
 

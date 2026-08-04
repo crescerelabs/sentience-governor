@@ -5,7 +5,7 @@ pipx install sentience-governor
 sentience --help
 ```
 
-That's the install. Two commands. The package registers four entry points on your `$PATH`: `sentience`, `sentience-cli`, `sentience-claude-code-hook`, and `sentience-sync`. The `sentience-sync` entry point is a sunset stub for the removed cloud telemetry CLI.
+That's the install. Two commands. The package registers four entry points on your `$PATH`: `sentience`, `sentience-cli`, `sentience-claude-code-hook`, and `sentience-mcp-server`.
 
 ## Requirements
 

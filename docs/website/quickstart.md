@@ -257,14 +257,12 @@ sentience-cli agent-trace.jsonl   # read from FileSink output
 
 The experimental Sync cloud telemetry CLI was removed in v0.2.8.3. Sentience Governor is local-first. Nothing is uploaded automatically.
 
-The `sentience-sync` command remains as a sunset stub and prints a local-first notice.
 
 ---
 
 ## Next
 
 - [Commands reference →](./commands.md)
-- [Cloud telemetry sunset →](./sync-privacy.md)
 - [Troubleshooting →](./troubleshooting.md)
 
 ---

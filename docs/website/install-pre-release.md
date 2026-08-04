@@ -78,7 +78,7 @@ sentience --help
 sentience-cli --help
 ```
 
-Each should print a usage screen. `sentience-sync` also installs as a sunset stub. Running it prints a local-first notice. If both print usage, you're installed and ready to go.
+Each should print a usage screen. If both print usage, you're installed and ready to go.
 
 ## What to do next
 

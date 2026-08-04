@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sentience-governor"
-version = "0.3.0"
-description = "Local-first governance for AI agents: hold each agent to the intent and scope it declares, keep a verifiable record of what it did, and flag anything out of bounds. Callable by Claude via an opt-in MCP server."
+version = "0.3.0.1"
+description = "Local-first governance for AI agents at runtime. Records supported agent actions at the execution boundary, evaluates them against declared intent, scope, and policy, and surfaces violations in a verifiable local trail."
 requires-python = ">=3.10"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
@@ -61,7 +61,11 @@ dev = [
 # the MCP SDK. Optional so the core install stays lean; installed via
 # `pip install "sentience-governor[mcp]"`.
 mcp = [
-    "mcp>=1.0",
+    # Bounded at <2 in v0.3.0.1: MCP SDK 2.0.0 removed
+    # `mcp.server.fastmcp`, which mcp_server/server.py imports, so an
+    # unbounded `mcp>=1.0` resolved a version that cannot run the server.
+    # Keep in sync with install_hint.MCP_SUPPORTED_RANGE (asserted by test).
+    "mcp>=1.0,<2",
 ]
 # The [demo] group is a convenience bundle for source-install users who
 # want to run the scripts in examples/. It is NOT a product dependency:
@@ -82,7 +86,6 @@ demo = [
 
 [project.scripts]
 sentience-cli = "sentience_governor.cli.viewer:main"
-sentience-sync = "sentience_sync.cli:main"
 sentience-claude-code-hook = "sentience_governor.wrapper.claude_code_hook:run_hook"
 sentience = "sentience_governor.cli.ux:main"
 sentience-mcp-server = "sentience_governor.mcp_server.server:main"
@@ -97,14 +100,14 @@ sentience_governor = ["data/showcase/*.jsonl", "data/skills/*/SKILL.md"]
 
 [tool.setuptools.packages.find]
 where = ["."]
-# include is an allowlist: only sentience_governor and sentience_sync are
+# include is an allowlist: only sentience_governor is
 # shipped in the wheel. examples/ and tests/ are intentionally NOT part of
 # the delivery package — examples/ contains demo scripts (e.g. claude_demo.py)
 # that are not product surface, and tests/ is the test suite. The exclude
 # below is belt-and-suspenders: even if the include allowlist is ever
 # loosened, these directories must remain out of the package.
-include = ["sentience_governor*", "sentience_sync*"]
-exclude = ["examples*", "tests*", "docs*"]
+include = ["sentience_governor*"]
+exclude = ["examples*", "tests*", "docs*", "server*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

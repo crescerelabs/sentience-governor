@@ -5,7 +5,59 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [0.3.0] — 2026-07-17
+## [0.3.0.1] — 2026-08-04
+
+**Patch release.** The MCP server was broken on every new install of the
+`[mcp]` extra: the extra declared an unbounded `mcp>=1.0`, and MCP SDK 2.0.0
+removed the module the server imports. This release bounds the dependency,
+makes the failure legible when it does occur, and removes the long-sunset
+`sentience-sync` stub.
+
+### Fixed
+- **MCP server works again on a fresh install.** The `[mcp]` extra declared an
+  unbounded `mcp>=1.0`; MCP SDK 2.0.0 removed `mcp.server.fastmcp`, which the
+  server imports, so every new install of the extra resolved a version that
+  could not run the server. The dependency is now `mcp>=1.0,<2`.
+- **An unsupported `mcp` version is no longer reported as a missing
+  dependency.** The two states printed the same message, so a user with `mcp`
+  2.x installed was told to install `mcp`, got "already satisfied", and had no
+  signal about the real cause. They are now distinguished, and the message
+  names the installed version and the supported range.
+- **Install remediation is context-aware.** A pipx-managed installation is no
+  longer told to run ambient `pip install`, which cannot reach its virtual
+  environment.
+
+### Removed
+- **`sentience-sync` command removed.** The Sync cloud-telemetry CLI was sunset
+  in v0.2.8.3 and had remained as a stub that printed a local-first notice.
+  The stub and its console entry point are now gone: **invoking
+  `sentience-sync` returns `command not found`.** Nothing else changes, and
+  the separate "Sentience Sync" **email list** at
+  `getsentience.ai/sentience-sync` is unaffected and still available.
+
+### Added
+- **`make fresh-resolve`, a standing release gate.** Builds a wheel and installs
+  it into a genuinely fresh environment per extra, with no tester-supplied pins,
+  then runs a feature smoke test for each and records every resolved version.
+  v0.3.0 passed every existing gate while shipping a broken extra, because the
+  gates ran in a developer environment whose `mcp` predated 2.0. This one
+  resolves dependencies the way a new user's machine does.
+
+### Changed
+- **Package summary and description rewritten.** The PyPI summary said the
+  product would "hold each agent to" its declared intent, which implies
+  enforcement the open-source release does not perform. Both the summary and the
+  README now describe what it does: records, evaluates, and surfaces violations.
+- **Public documentation corrected.** Removed unsupported absolute claims about
+  outbound network calls, persistence, and observing every tool call; two
+  product limitations now appear wherever the product is described in full,
+  namely that declared intent is untrusted input and that Sentience governs
+  supported agent actions rather than model behavior or content safety.
+- **Install guidance now names the right command for the environment.** The
+  `[mcp]` extra instructions distinguish a virtualenv from a pipx-managed
+  install in the docs as well as the CLI.
+
+## [0.3.0] — 2026-07-16
 
 **Governance Claude can call.** This release adds an opt-in MCP server so
 Claude can call Sentience governance tools directly inside a session: read

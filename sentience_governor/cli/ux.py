@@ -2279,9 +2279,14 @@ def _print_mcp_consent_notice(
     print("  - No HTTP server is enabled (stdio only, local to this machine).")
     print("  - Token analysis is unavailable until a session ends (SessionEnd).")
     if not _mcp_extra_installed():
+        # Context-aware: a pipx-managed install cannot be repaired by ambient
+        # pip, so never print that command to a pipx user.
+        from sentience_governor.mcp_server.install_hint import remediation_lines
+
         print()
         print("  Note: install the server dependency to run it:")
-        print('    pip install "sentience-governor[mcp]"')
+        for _cmd in remediation_lines(repair=False):
+            print(f"    {_cmd}")
 
 
 def _register_mcp_server(project_dir: Path) -> bool:
@@ -2293,10 +2298,12 @@ def _register_mcp_server(project_dir: Path) -> bool:
     """
     command = _resolve_mcp_server_binary()
     if command is None:
+        from sentience_governor.mcp_server.install_hint import remediation_lines
+
+        _hint = "; ".join(remediation_lines(repair=False))
         print(
             "warning: could not locate the 'sentience-mcp-server' binary; "
-            "skipping MCP registration. Install the server dependency with: "
-            'pip install "sentience-governor[mcp]"',
+            f"skipping MCP registration. Install the server dependency with: {_hint}",
             file=sys.stderr,
         )
         return False

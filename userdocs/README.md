@@ -2,14 +2,13 @@
 
 > **Looking for the project overview?** → **[root `README.md`](../README.md)** — PyPI install, quickstarts, CLI commands table, Claude Code hook setup, LangChain + MCP integration. That's the landing page.
 >
-> This directory holds the deep-dive operator guide for **Sentience Governor** (the runtime). The former **Sync cloud telemetry** CLI was sunset in v0.2.8.3 — see [`sentience_sync.md`](./sentience_sync.md) for the note. Start at the root README first; come here when you want the full manual.
+> This directory holds the deep-dive operator guide for **Sentience Governor** (the runtime). Start at the root README first; come here when you want the full manual.
 
 ---
 
 User-facing guides for the two components shipped in this distribution:
 
 - **[`sentience_governor.md`](./sentience_governor.md)** — Sentience Governor, the runtime that wraps your agent and produces governance traces.
-- **[`sentience_sync.md`](./sentience_sync.md)** — _Sunset note._ The Sync cloud-telemetry CLI was removed in v0.2.8.3; Sentience Governor is local-first.
 
 These docs are for **operators and integrators** — people who want to use the package. For the architecture, see [`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md).
 
@@ -34,7 +33,11 @@ For the opt-in MCP server (governance tools Claude can call), install the
 extra:
 
 ```bash
+# virtualenv / pip
 pip install "sentience-governor[mcp]"
+
+# pipx-managed install (ambient pip cannot reach the pipx venv)
+pipx install --force "sentience-governor[mcp]"
 ```
 
 Or from source for development:
@@ -47,13 +50,12 @@ source .venv/bin/activate
 pip install -e ".[dev]"
 ```
 
-Sentience is local-first. The experimental **Sync cloud telemetry** CLI was sunset in v0.2.8.3 (removed from the supported product); the `sentience-sync` command now prints a local-first notice. See [`sentience_sync.md`](./sentience_sync.md).
+Sentience is local-first by default. The experimental **Sync cloud telemetry** CLI was sunset in v0.2.8.3 and its `sentience-sync` command was removed in v0.3.0.1.
 
 ## What this distribution contains
 
 ```
 sentience_governor/   # the runtime — wraps agents, emits governance events
-sentience_sync/       # sunset stub (cloud telemetry removed in v0.2.8.3)
 examples/             # standalone demo scripts (NOT in the wheel)
 docs/                 # architecture + website docs (NOT in the wheel)
 userdocs/             # this folder (NOT in the wheel)
@@ -65,7 +67,6 @@ The four CLI commands installed by `pip install`:
 - **`sentience`** — curated viewer for agent-hook session traces (Claude Code today): `sentience status`, `sentience list`, `sentience open [--latest | <id>] [--summary]`
 - **`sentience-cli`** — raw viewer for library traces (MCP wrapper, LangChain, golden-trace fixtures)
 - **`sentience-claude-code-hook`** — invoked by Claude Code via `.claude/settings.json`; not run by operators directly
-- **`sentience-sync`** — _sunset stub_ (cloud telemetry removed in v0.2.8.3); prints a local-first notice and exits 0
 
 Run any of them with `--help` for built-in usage. Or read the deep-dive guides above. The root `README.md` has a compact commands table if you just need the skim.
 
@@ -73,7 +74,7 @@ Run any of them with `--help` for built-in usage. Or read the deep-dive guides a
 
 The Sentience Governor sits between your agent and its tools. When the agent calls a tool, the Governor emits a structured governance event describing what happened — who the agent is, what it intended, what tool it called, what data came back, what it tried to persist. These events accumulate as a trace you can read with `sentience-cli`.
 
-The former **Sync cloud telemetry** CLI was sunset in v0.2.8.3: Sentience Governor is local-first and uploads nothing. The `sentience-sync` command remains only as a stub that prints a local-first notice. (The separate "Sentience Sync" email list at `getsentience.ai/sentience-sync` is unrelated and still available.)
+The former **Sync cloud telemetry** CLI was sunset in v0.2.8.3 and its `sentience-sync` command was removed in v0.3.0.1. (The separate "Sentience Sync" email list at `getsentience.ai/sentience-sync` is unrelated and still available.)
 
 ## Feedback
 

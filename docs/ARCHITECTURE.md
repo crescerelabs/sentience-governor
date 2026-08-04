@@ -74,7 +74,7 @@ These four properties are the spine of every architectural decision in v0.2.x.
 | **Wrapper, not gateway** | The wrapper sits beside the agent runtime. It does not proxy the call. There is no Sentience-shaped server the agent has to route through. Zero added latency to the agent's request path. The agent does not break if Sentience is removed. |
 | **Payload-free** | Sentience never inspects prompts, completions, or any other model-content payload. Only structured metadata (tool_id, target_system, working directory, file extension, time delta, etc.) crosses into the EventBuilder. This is the load-bearing compliance posture: the operator does not need to negotiate with a governance vendor about what the vendor sees. |
 | **Deterministic** | Policy evaluation is pure logic computed from structured metadata. No LLM judge. No learned models. No probabilistic inference. The same input metadata always produces the same event with the same flags, the same policy_violations, and the same simulated_consequence. |
-| **Local-first** | The profile lives at `~/.sentience/profile.yaml`. The event log lives on the operator's machine. The analyzer is a CLI tool. No account. No cloud. No phone-home. No outbound network calls in the open tier. |
+| **Local-first** | The profile lives at `~/.sentience/profile.yaml`. The event log lives on the operator's machine. The analyzer is a CLI tool. No account. No cloud. No telemetry. Governance runs with the network off; the two network-capable paths (an operator-configured sink, and the one-time launch-list prompt) are opt-in and neither is on the governance path. |
 
 These four properties define what stays the same across every Sentience release. The paid tier adds central event ingestion, an agent registry, an enforcement engine, organizational memory, and compliance surfaces. The four properties of the wrapper itself do not change.
 
@@ -278,7 +278,7 @@ Both tiers run on the same event schema and the same control points. The wrapper
 | **Memory** | Within-session only | Organizational memory; longitudinal drift; cross-session profile-fingerprint correlation |
 | **Compliance surfaces** | None | Audit trails, policy distribution, technical documentation surfaces supporting EU AI Act Article 12 logging and SOC 2 work |
 | **Agent registry** | None | First-class component; fleet visibility |
-| **Network** | Zero outbound calls | Sentience-hosted OR customer-hosted control plane |
+| **Network** | No outbound calls on the governance path | Sentience-hosted OR customer-hosted control plane |
 | **Account** | None required | Required for control-plane tier |
 
 **Same schema. Same control points. Open tier surfaces. Paid tier enforces.** Upgrade from open to paid is a deployment decision, not a rebuild. Open-tier events are structurally identical to the events the paid control plane consumes for enforcement, organizational memory, and compliance work.
@@ -340,6 +340,18 @@ LLM-as-judge has legitimate use cases. Governance at the execution boundary is n
 ---
 
 ## What v0.2.5 is not
+
+Two boundaries hold for every release:
+
+- **Declared intent is untrusted input.** Sentience can identify when captured
+  actions diverge from what an agent declared. It cannot determine whether the
+  declaration itself was truthful or complete, or infer the agent's underlying
+  motives. Recording an unsafe action correctly does not make the action safe or
+  the agent trustworthy.
+- **Governs supported agent actions, not model behavior.** It evaluates
+  observable agent actions in business and operational workflows. It does not
+  detect bias, toxicity, hallucinations, harmful content, or other
+  model-output and content-safety issues.
 
 Honesty about scope limits is load-bearing.
 

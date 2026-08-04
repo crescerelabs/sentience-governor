@@ -39,7 +39,6 @@ Trace = all events for a session
 - **[Install](./install.md)** — get the CLI on your machine.
 - **[Quickstart](./quickstart.md)** — from zero to your first trace in three minutes.
 - **[Commands](./commands.md)** — reference for every CLI command.
-- **[Cloud telemetry sunset](./sync-privacy.md)** — what changed in v0.2.8.3 and what remains local.
 - **[Troubleshooting](./troubleshooting.md)** — common issues and their fixes.
 - **[Changelog](./changelog.md)** — what changed, and when.
 
@@ -47,8 +46,8 @@ Trace = all events for a session
 
 - `sentience` → view agent sessions and run `pulse`
 - `sentience-cli` → raw trace viewer
-- `sentience-sync` → sunset stub for the removed Sync cloud telemetry CLI
 - `sentience-claude-code-hook` → Claude Code hook entry point
+- `sentience-mcp-server` → opt-in MCP server (needs the `[mcp]` extra)
 
 ## A governance runtime
 
@@ -71,10 +70,6 @@ The in-chat commands are operator-invoked, latest-session only, and read-only.
 ## Trace files
 
 Claude Code session traces land at `~/.sentience/traces/claude-code/`. You can read, grep, diff, replay, or feed them into your own analysis.
-
-## Sync CLI
-
-`sentience-sync` is a sunset stub for the removed Sync cloud telemetry CLI. See [Cloud telemetry sunset](./sync-privacy.md).
 
 ## The philosophy
 

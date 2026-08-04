@@ -45,7 +45,6 @@ Four CLI entry points registered by `pip install sentience-governor`.
 | [`sentience`](#sentience) | Reviewing Claude Code session traces, plus running derived-metric analyzers (e.g. `sentience analyze undeclared-intent`) |
 | [`sentience-cli`](#sentience-cli) | Reviewing library-integrated agent traces |
 | [`sentience-claude-code-hook`](#sentience-claude-code-hook) | Claude Code invokes this; you do not run it directly |
-| [`sentience-sync`](#sentience-sync) | Sunset — cloud telemetry removed in v0.2.8.3 |
 
 ---
 
@@ -110,7 +109,7 @@ sentience init claude-code --mcp              # also register the MCP server (ne
 
 Idempotent — it merges into an existing `.claude/settings.json` without clobbering other hooks or settings, and re-running refreshes skills safely: an unchanged skill is a no-op, a new release updates managed skills, and a skill you've hand-edited is preserved unless `--force` (tracked via a per-root `.sentience-skills.json` manifest). By default hooks are wired for the initialized project while skills install to your personal `~/.claude/skills/`. It resolves the correct hook-binary path for your install (pipx, pip-in-venv, or source), so you don't hand-edit JSON or guess a path — and it warns (never fails) if `sentience` isn't resolvable on your `$PATH`.
 
-`--mcp` (new in 0.3.0) additionally registers the [Sentience MCP server](#sentience-mcp-server) into the project's `.mcp.json` and prints a consent notice. It is opt-in: without `--mcp`, nothing MCP-related is registered. Needs the server extra: `pip install "sentience-governor[mcp]"`.
+`--mcp` (new in 0.3.0) additionally registers the [Sentience MCP server](#sentience-mcp-server) into the project's `.mcp.json` and prints a consent notice. It is opt-in: without `--mcp`, nothing MCP-related is registered. Needs the server extra, installed into the same environment as the CLI: `pip install "sentience-governor[mcp]"` in a virtualenv, or `pipx install --force "sentience-governor[mcp]"` for a pipx-managed install.
 
 ### `sentience-mcp-server`
 
@@ -290,28 +289,8 @@ Running it by hand is harmless but does nothing useful.
 
 ---
 
-## `sentience-sync` — sunset stub
-
-The experimental Sync cloud telemetry CLI was removed from the supported product in v0.2.8.3.
-
-`sentience-sync` remains as a compatibility stub. Any invocation prints the same local-first notice and exits 0:
-
-```bash
-sentience-sync
-sentience-sync register
-sentience-sync run
-sentience-sync update-check
-```
-
-Your local governance is unaffected. Use `sentience`, `sentience-cli`, and `/sentience-*` commands for local capture, review, and pulse reports.
-
-Optional cloud or control-plane capabilities may return later as part of the MCP roadmap.
-
----
-
 ## Next
 
-- [Cloud telemetry sunset →](./sync-privacy.md)
 - [Troubleshooting →](./troubleshooting.md)
 
 ---

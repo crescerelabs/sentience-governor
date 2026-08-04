@@ -21,7 +21,6 @@ Source markdown for the public documentation at getsentience.ai. Edit here; the 
 | `install.md` | `/docs/install` |
 | `quickstart.md` | `/docs/quickstart` |
 | `commands.md` | `/docs/commands` |
-| `sync-privacy.md` | `/docs/sync-privacy` |
 | `troubleshooting.md` | `/docs/troubleshooting` |
 | `changelog.md` | `/docs/changelog` |
 
