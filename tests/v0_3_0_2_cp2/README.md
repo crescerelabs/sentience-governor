@@ -1,25 +1,39 @@
-# CP2 tests — v0.3.0.2 LangGraph session continuity
+# v0.3.0.2 — root-scoped governance session tests
 
-**Contract:** internal design spec `765ab57`,
-`docs/design/0001-langgraph-root-scoped-governance-sessions.md`.
+**Contract:** `docs/design/0001-langgraph-root-scoped-governance-sessions.md`
+and `docs/design/0002-sessionmanager-concurrent-sessions-per-agent.md`.
 
-**Placement note.** These belong in `tests/` in the public repo alongside
-`test_langchain_handler.py`. They are here because the public repo is off
-limits (operator, 2026-08-18). They import the product via `PYTHONPATH` and
-must move when public-repo work is authorised.
+These were written before the fix and committed red, so the fix is measured
+rather than asserted. They cover:
+
+- root-scoped sessions — a nested chain start must not open a second session,
+  and a nested chain end must not tear one down;
+- ancestry-based routing, since tool events parent to the node rather than to
+  the root;
+- overlapping root invocations through one handler, on threads and on one
+  event loop;
+- branch-scoped LLM turn telemetry, because parallel graph nodes have
+  overlapping turns;
+- middleware binding by active-root count;
+- the legacy path, where no callback run ids are supplied;
+- root isolation in the session registry.
 
 ## Running
 
 ```bash
-cd tests/v0_3_0_2_cp2
-PYTHONPATH=/Users/rohit-nallapeta/sentience-governor:. \
-  /Users/rohit-nallapeta/sentience-governor/.venv/bin/python -m pytest . -q
+python -m pytest tests/v0_3_0_2_cp2 -q
 ```
 
-## Expected state at CP2 (against v0.3.0.1)
+## Expected state
 
-**13 failed, 9 passed.** The 13 encode reproduced defects and must fail until
-CP3. The 9 are regression/compatibility and already hold.
+| Against | Result |
+| :-- | :-- |
+| v0.3.0.1, before the fix | **13 failed, 10 passed** |
+| v0.3.0.2, after the fix | **23 passed** |
 
-Obligation 11 (the existing 32 adapter tests) is verified separately against
-the public repo and those files are not touched.
+The 10 that pass before the fix are regression and compatibility tests that
+must stay green through it — including the true-positive POL-001 on a tool the
+caller never declared, which the fix must not suppress.
+
+The 32 pre-existing adapter tests in `tests/test_langchain_handler.py` are part
+of the same contract and are **unmodified** by this release.
