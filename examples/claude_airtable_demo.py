@@ -229,7 +229,7 @@ class ToolDispatcher:
 # id on every Anthropic call (see while-loop below); every tool call
 # that fires from that turn shares the same turn id, so downstream
 # consumers can dedupe by ``(session_id, llm_turn_id)`` before summing
-# token counts. See userdocs/sentience_governor.md "Token tracking
+# token counts. See docs/guide/sentience_governor.md "Token tracking
 # (optional)" for the full aggregation contract.
 _TURN_CONTEXT: dict = {
     "response": None,  # the last anthropic.Message

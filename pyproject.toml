@@ -47,8 +47,8 @@ dependencies = [
 
 [project.urls]
 Homepage = "https://getsentience.ai"
-Documentation = "https://getsentience.ai/docs/"
-Changelog = "https://getsentience.ai/docs/changelog/"
+Documentation = "https://github.com/crescerelabs/sentience-governor/blob/main/docs/index.md"
+Changelog = "https://github.com/crescerelabs/sentience-governor/blob/main/CHANGELOG.md"
 Repository = "https://github.com/crescerelabs/sentience-governor"
 Issues = "https://github.com/crescerelabs/sentience-governor/issues"
 

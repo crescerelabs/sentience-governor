@@ -6,7 +6,7 @@ contact_links:
       Report privately. Do not open a public issue for a security report.
       See SECURITY.md for what is in scope.
   - name: Documentation
-    url: https://github.com/crescerelabs/sentience-governor/blob/main/docs/website/index.md
+    url: https://github.com/crescerelabs/sentience-governor/blob/main/docs/index.md
     about: Installation, commands, and the governance model.
   - name: Question or idea
     url: https://github.com/crescerelabs/sentience-governor/discussions

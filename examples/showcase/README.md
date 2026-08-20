@@ -39,4 +39,4 @@ git diff --exit-code examples/showcase/sample_report_*.md
 ## Related
 
 * Live runnable demo: `examples/v024_undeclared_intent_demo.py`
-* Userdoc: §9 in `userdocs/sentience_governor.md` (added in v0.2.4)
+* User guide: §9 in `docs/guide/sentience_governor.md` (added in v0.2.4)

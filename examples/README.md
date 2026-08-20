@@ -254,5 +254,5 @@ demos, on purpose):
 - No `MEMORY_WRITE_ATTEMPT` event (no write tools)
 - The session summary shows policy violations (the POL-003s) —
   this is the honest LangChain first-run experience, matching the
-  failure-first walkthrough in `userdocs/sentience_governor.md` §3.1
+  failure-first walkthrough in `docs/guide/sentience_governor.md` §3.1
 

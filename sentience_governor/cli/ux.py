@@ -301,7 +301,7 @@ def _event_has_code(event: dict, code: str) -> bool:
 
 
 # FIX-3 (v0.2.8): the status/list surfaces must never print an advisory
-# count under a "Violations" label (userdocs §4.3 distinction; findings
+# count under a "Violations" label (user guide §4.3 distinction; findings
 # F2/F3 — the 78-vs-58 confusion). Partition the classifier's anomaly
 # counts by code shape; expose the reconciliation via `status --json`.
 _POL_CODE_RE = re.compile(r"^POL-\d{3}$")

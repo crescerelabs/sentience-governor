@@ -169,7 +169,7 @@ Status values: `ok` (full attribution), `partial` (analysis completed, but some 
 
 When no intent declaration exists in the session, the analyzer explains that the result may reflect a framework limitation rather than agent drift.
 
-Saved reports land in `~/.sentience/reports/undeclared-intent-<sid-prefix>-<timestamp>.md`. See the [user guide §10](https://github.com/crescerelabs/sentience-governor/blob/main/userdocs/sentience_governor.md#10-analyzers--derived-metrics-over-captured-traces) for the full output schema.
+Saved reports land in `~/.sentience/reports/undeclared-intent-<sid-prefix>-<timestamp>.md`. See the [user guide §10](https://github.com/crescerelabs/sentience-governor/blob/main/docs/guide/sentience_governor.md#10-analyzers--derived-metrics-over-captured-traces) for the full output schema.
 
 ### `sentience analyze policy-violations [target] [flags]`
 
@@ -207,7 +207,7 @@ Each section ends with a one-line "Why it matters" translation — the metric be
 
 Since v0.2.9 the pulse also surfaces **tool calls** as a first-class field (total, the four operation classes execute / read / write / delete, and the top tools by call count) and **measured tool-token attribution**: the tokens on turns that fired a tool call, plus a per-tool full-turn-credit view. Attribution stops at the turn (the model meters tokens per turn, not per tool), so figures read "tokens on turns involving tool X," never per-tool spend. The per-tool view is non-additive (a turn involving several tools credits each the full turn total).
 
-Saved reports land in `~/.sentience/reports/pulse-<sid-prefix>-<timestamp>.md`. The Markdown footer includes a one-line email-list sign-up prompt. Set `SENTIENCE_NO_SYNC_PROMPT=1` to suppress the footer globally. See the [user guide §12](https://github.com/crescerelabs/sentience-governor/blob/main/userdocs/sentience_governor.md#12-sentience-pulse) for the full output schema and a walkthrough of the three pre-rendered showcase scenarios.
+Saved reports land in `~/.sentience/reports/pulse-<sid-prefix>-<timestamp>.md`. The Markdown footer includes a one-line email-list sign-up prompt. Set `SENTIENCE_NO_SYNC_PROMPT=1` to suppress the footer globally. See the [user guide §12](https://github.com/crescerelabs/sentience-governor/blob/main/docs/guide/sentience_governor.md#12-sentience-pulse) for the full output schema and a walkthrough of the three pre-rendered showcase scenarios.
 
 ### `sentience explain [--json]`
 
@@ -263,7 +263,7 @@ Verbs:
 2. **When the agent has crossed a task boundary** — `task_boundary.signals` is any subset of `dir_change`, `file_type_shift`, `read_to_write_transition`, `time_gap`. Fires `TASK_BOUNDARY_CROSSED` on the next `SCOPE_ASSERTED`.
 3. **Which tools should be treated as high-consequence** — `high_consequence.tools` is a list of regex patterns matched against `<tool_id>:<target_system>`. Fires `HIGH_CONSEQUENCE_DETECTED` on match.
 
-All signals are observational. Nothing is blocked, scoped, or modified. See the [user guide §11](https://github.com/crescerelabs/sentience-governor/blob/main/userdocs/sentience_governor.md#11-governance-profiles) for the full schema and walkthrough, and `examples/showcase/v025-closed-loop/` for a complete runnable example.
+All signals are observational. Nothing is blocked, scoped, or modified. See the [user guide §11](https://github.com/crescerelabs/sentience-governor/blob/main/docs/guide/sentience_governor.md#11-governance-profiles) for the full schema and walkthrough, and `examples/showcase/v025-closed-loop/` for a complete runnable example.
 
 ---
 

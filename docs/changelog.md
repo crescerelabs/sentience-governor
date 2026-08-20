@@ -211,7 +211,7 @@ sentience profile init             # create your first profile
 - **Profile fingerprint on every event.** The 12-character hex prefix of the profile's content hash. Operator can correlate any trace back to the profile that produced it. The field is omitted entirely on traces from sessions without a profile, so v0.2.4-shaped traces stay byte-identical under v0.2.5.
 - **Profile-aware analyzer report sections.** `sentience analyze undeclared-intent` gains three optional sections — Profile (fingerprint + schema version), High-consequence operations, Task boundaries crossed. Each section is omitted when its underlying field is empty, so v0.2.4-shaped traces produce byte-identical analyzer output.
 - **Closed-loop showcase.** A complete runnable embodiment of the loop — profile, agent recipe, generated trace, generated analyzer report, walkthrough — at `examples/showcase/v025-closed-loop/`. Companion script `examples/v025_closed_loop_demo.py` regenerates the trace and report deterministically.
-- **Userdocs §11 "Governance Profiles."** Full user-guide section covering what a profile is, how to create one, the schema, the CLI verbs, what firing looks like in the trace, and integration notes for LangChain and MCP. See [`userdocs/sentience_governor.md` §11](https://github.com/crescerelabs/sentience-governor/blob/main/userdocs/sentience_governor.md#11-governance-profiles).
+- **Userdocs §11 "Governance Profiles."** Full user-guide section covering what a profile is, how to create one, the schema, the CLI verbs, what firing looks like in the trace, and integration notes for LangChain and MCP. See [`userdocs/sentience_governor.md` §11](https://github.com/crescerelabs/sentience-governor/blob/main/docs/guide/sentience_governor.md#11-governance-profiles).
 
 ### Changed
 
@@ -225,7 +225,7 @@ sentience profile init             # create your first profile
 - **Not cloud-required.** Profile lifecycle (author, validate, edit, export, import) runs entirely locally. No account, no API key, no network calls. `~/.sentience/profile.yaml` never leaves the machine; `sentience-sync` data flows are unchanged.
 - **Not profile inheritance yet.** The `extends` field is recognized and preserved in `validate()` output, but the runtime does not yet resolve inheritance chains. Reserved for a future release.
 
-See the [user guide §11](https://github.com/crescerelabs/sentience-governor/blob/main/userdocs/sentience_governor.md#11-governance-profiles) for the full walkthrough, schema reference, CLI commands, and the closed-loop example.
+See the [user guide §11](https://github.com/crescerelabs/sentience-governor/blob/main/docs/guide/sentience_governor.md#11-governance-profiles) for the full walkthrough, schema reference, CLI commands, and the closed-loop example.
 
 ---
 
@@ -262,7 +262,7 @@ pip install --upgrade sentience-governor   # if pip-in-venv
 - **Not a dashboard.** Single-session reports today; consolidated views across runs are downstream. See [getsentience.ai/launch-list](https://getsentience.ai/launch-list/) to be notified.
 - **Not a PDF report integration.** The PDF generator at `examples/sentience_business_report.py` (v0.2.3 cycle) is unchanged; the v0.2.4 metric is not surfaced through it. Consolidated visualization lands in future hosted surfaces.
 
-See [`userdocs/sentience_governor.md` §10](https://github.com/crescerelabs/sentience-governor/blob/main/userdocs/sentience_governor.md#10-analyzers--derived-metrics-over-captured-traces) for the full guide.
+See [`userdocs/sentience_governor.md` §10](https://github.com/crescerelabs/sentience-governor/blob/main/docs/guide/sentience_governor.md#10-analyzers--derived-metrics-over-captured-traces) for the full guide.
 
 ---
 
@@ -296,7 +296,7 @@ pip install --upgrade sentience-governor   # if pip-in-venv
 - Not a token-budget enforcement feature.
 - Not a dashboard. The hosted console and downstream analytics ship separately — see [getsentience.ai/launch-list](https://getsentience.ai/launch-list/) to be notified.
 
-See [`userdocs/sentience_governor.md`](https://github.com/crescerelabs/sentience-governor/blob/main/userdocs/sentience_governor.md#token-tracking-optional-v023) "Token tracking (optional)" for the integration guide and the full aggregation contract.
+See [`userdocs/sentience_governor.md`](https://github.com/crescerelabs/sentience-governor/blob/main/docs/guide/sentience_governor.md#token-tracking-optional-v023) "Token tracking (optional)" for the integration guide and the full aggregation contract.
 
 ---
 
