@@ -2,11 +2,11 @@
 """Public-surface guard: fail if private-only references reach the public tree.
 
 This is the standing invariant. `release_check.py`'s gate-10 forbidden-surface
-check is NARROWER by design: its DOC_GLOBS cover only README.md, userdocs/**,
-docs/website/**, Makefile and scripts/*.py, it exempts CHANGELOG.md by name, and
-it runs on tags only. It therefore never inspects sentience_governor/**, which is
-the highest-risk surface. This script covers the whole tree, on every push and
-pull request.
+check is NARROWER by design: its DOC_GLOBS cover only README.md, docs/*.md,
+docs/integrations/**, docs/guide/**, Makefile and scripts/*.py, it exempts the
+root CHANGELOG.md by path, and it runs on tags only. It therefore never inspects
+sentience_governor/**, which is the highest-risk surface. This script covers the
+whole tree, on every push and pull request.
 
 Enumeration has two modes because the sanitization workflow runs outside any git
 repository before the first commit exists:
