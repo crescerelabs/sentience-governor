@@ -304,7 +304,7 @@ sentience demo declare-intent     # the POL-001 before/after flip
 | **Command reference** | [docs/website/commands.md](https://github.com/crescerelabs/sentience-governor/blob/main/docs/website/commands.md) |
 | **Claude Code quickstart** | [docs/website/quickstart.md](https://github.com/crescerelabs/sentience-governor/blob/main/docs/website/quickstart.md) |
 | **Architecture** | [docs/ARCHITECTURE.md](https://github.com/crescerelabs/sentience-governor/blob/main/docs/ARCHITECTURE.md) |
-| **Full docs** | <https://getsentience.ai/docs/> |
+| **Full docs** | [docs/website/index.md](https://github.com/crescerelabs/sentience-governor/blob/main/docs/website/index.md) |
 | **Changelog** | [CHANGELOG.md](https://github.com/crescerelabs/sentience-governor/blob/main/CHANGELOG.md) |
 | **Examples** | [examples/](https://github.com/crescerelabs/sentience-governor/tree/main/examples/) |
 
