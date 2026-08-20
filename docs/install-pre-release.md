@@ -1,9 +1,8 @@
----
-title: Install (pre-release / early-access testers)
-description: Install instructions for non-public pre-release builds hosted on TestPyPI.
-sidebar:
-  hidden: true
----
+# Install (pre-release / early-access testers)
+
+> Install instructions for non-public pre-release builds hosted on TestPyPI.
+> Deliberately not linked from the documentation index: it is handed out
+> directly to testers, not part of normal navigation.
 
 ## What this is
 

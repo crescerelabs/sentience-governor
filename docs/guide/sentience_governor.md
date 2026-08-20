@@ -63,7 +63,7 @@ The Governor does **not** block agent execution. It observes. The story for "now
 
 ### Install
 
-For CLI usage (the four commands `sentience`, `sentience-cli`, `sentience-sync`, `sentience-claude-code-hook` available globally on your `$PATH`):
+For CLI usage (the three commands `sentience`, `sentience-cli`, `sentience-claude-code-hook` available globally on your `$PATH`):
 
 ```bash
 pipx install sentience-governor
@@ -466,6 +466,34 @@ agent = create_react_agent(llm=llm, tools=tools, prompt=prompt, middleware=[midd
 ```
 
 The middleware is **observe-only in v0** — it never blocks, never modifies tool results, just instruments.
+
+### Sessions, graphs, and concurrency (v0.3.0.2)
+
+One governance session corresponds to one **root invocation**. Frameworks
+that fire chain-level callbacks more than once per run — LangGraph fires
+them once for the graph and once per node — still produce a single session,
+because the handler creates one only for the outermost chain start and tears
+it down only when that same run ends. Nested starts and ends are recorded as
+structure, not as new sessions.
+
+That matters for what the trace says about you: every session gets its own
+`INTENT_DECLARED` baseline, so a tool inside your declared capabilities is
+evaluated against that baseline no matter how deeply the graph nests it.
+Before v0.3.0.2 a nested run could produce extra sessions with no baseline,
+and those reported POL-001 against tools you had in fact declared.
+
+**One handler may be shared across overlapping runs.** Two invocations in
+flight at once — on threads or on one event loop — get separate sessions,
+and neither can take the other's token usage, model, provider or
+`llm_turn_id`. The same isolation holds between parallel branches inside a
+single graph, whose LLM turns genuinely overlap.
+
+Two limits worth knowing. `SentienceMiddleware` receives no run identifiers
+from LangChain, so it is still **one middleware instance per agent run**; it
+attributes tool calls to the single active run and reports a
+`GOVERNANCE_ERROR` rather than guessing when more than one is open. And a
+tool event that cannot be traced back to a known root is skipped rather than
+attached to an arbitrary session.
 
 ## 7. Integration: Claude Code sessions
 
@@ -1832,7 +1860,7 @@ This list exists so you don't form wrong expectations:
 
 **This is a pre-release.** The current release fingerprint:
 
-- Version: `0.3.0`
+- Version: `0.3.0.2`
 - License: Apache 2.0 (Crescere Labs, Inc.)
 
 `0.3.0` is a backward-compatible additive release: governance Claude can
@@ -2052,4 +2080,4 @@ If you want explicit visibility into failed tool calls in the trace, that's trac
 
 ---
 
-For more depth: [`../examples/README.md`](../examples/README.md) covers the runnable demo against real Claude.
+For more depth: [`examples/README.md`](../../examples/README.md) covers the runnable demo against real Claude.

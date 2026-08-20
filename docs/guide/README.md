@@ -1,8 +1,8 @@
 # Sentience user documentation
 
-> **Looking for the project overview?** → **[root `README.md`](../README.md)** — PyPI install, quickstarts, CLI commands table, Claude Code hook setup, LangChain + MCP integration. That's the landing page.
+> **Looking for the project overview?** → **[root `README.md`](../../README.md)** — PyPI install, quickstarts, CLI commands table, Claude Code hook setup, LangChain + MCP integration. That's the landing page.
 >
-> This directory holds the deep-dive operator guide for **Sentience Governor** (the runtime). Start at the root README first; come here when you want the full manual.
+> This directory holds the deep-dive operator guide for **Sentience Governor** (the runtime). Start at the root README first, then [the docs index](../index.md); come here when you want the full manual.
 
 ---
 
@@ -10,7 +10,7 @@ User-facing guides for the two components shipped in this distribution:
 
 - **[`sentience_governor.md`](./sentience_governor.md)** — Sentience Governor, the runtime that wraps your agent and produces governance traces.
 
-These docs are for **operators and integrators** — people who want to use the package. For the architecture, see [`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md).
+These docs are for **operators and integrators** — people who want to use the package. For the architecture, see [`docs/ARCHITECTURE.md`](../ARCHITECTURE.md).
 
 ## Which doc do I read?
 
@@ -19,11 +19,11 @@ These docs are for **operators and integrators** — people who want to use the 
 | "What does this package do?" | [`sentience_governor.md`](./sentience_governor.md) §1–2 |
 | "How do I wrap my agent?" | [`sentience_governor.md`](./sentience_governor.md) §5–6 |
 | "How do I see what my agent did?" | [`sentience_governor.md`](./sentience_governor.md) §8 (the CLI viewer) |
-| "Can I run a real demo with Claude?" | [`../examples/README.md`](../examples/README.md) |
+| "Can I run a real demo with Claude?" | [`examples/README.md`](../../examples/README.md) |
 
 ## Project status
 
-**v0.3.0** (Apache 2.0). Install:
+**v0.3.0.2** (Apache 2.0). Install:
 
 ```bash
 pip install sentience-governor
@@ -57,12 +57,11 @@ Sentience is local-first by default. The experimental **Sync cloud telemetry** C
 ```
 sentience_governor/   # the runtime — wraps agents, emits governance events
 examples/             # standalone demo scripts (NOT in the wheel)
-docs/                 # architecture + website docs (NOT in the wheel)
-userdocs/             # this folder (NOT in the wheel)
-tests/                # 370+ passing tests (NOT in the wheel)
+docs/                 # all documentation, incl. this guide (NOT in the wheel)
+tests/                # passing test suite (NOT in the wheel)
 ```
 
-The four CLI commands installed by `pip install`:
+The three CLI commands installed by `pip install`:
 
 - **`sentience`** — curated viewer for agent-hook session traces (Claude Code today): `sentience status`, `sentience list`, `sentience open [--latest | <id>] [--summary]`
 - **`sentience-cli`** — raw viewer for library traces (MCP wrapper, LangChain, golden-trace fixtures)
