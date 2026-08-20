@@ -51,7 +51,20 @@ PRIVATE_DIRS = [
     "docs/announcements",
 ]
 
+# Names of the private repositories themselves. Directory patterns alone were
+# not enough: the split scrubbed internal *paths* but left the internal repo's
+# NAME behind in a Makefile header, where it sat in the public tree undetected
+# because nothing looked for it. A repo name is the same class of residue as a
+# repo path, and reads to an outside reader as "this was carved out of
+# something private".
+PRIVATE_REPOS = [
+    "sentience-gov-build",
+    "rohynal/sentience-internal",
+    "sentience-internal",
+]
+
 PATTERNS = [(d, re.compile(re.escape(d))) for d in PRIVATE_DIRS]
+PATTERNS += [(r, re.compile(re.escape(r))) for r in PRIVATE_REPOS]
 PATTERNS.append(("server/", re.compile(r"(?<![\w./-])server/")))
 # Personal home paths. Not email addresses: any generic email regex flags the
 # required pyproject maintainer address and the SECURITY.md disclosure route,
@@ -59,7 +72,9 @@ PATTERNS.append(("server/", re.compile(r"(?<![\w./-])server/")))
 # manual.
 PATTERNS.append(("/Users/", re.compile(r"/Users/")))
 
-# Exactly two, by design. Both must contain these literals to function.
+# Exactly two, by design. Both must contain these literals to function: this
+# file defines PRIVATE_DIRS / PRIVATE_REPOS, and the forbidden-pattern list
+# necessarily spells out the surfaces it bans. Everything else is scanned.
 EXEMPT_PATHS = {
     "scripts/check_public_surface.py",
     "scripts/release_check_forbidden.txt",

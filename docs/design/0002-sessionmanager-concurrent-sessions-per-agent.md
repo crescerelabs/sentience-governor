@@ -4,9 +4,9 @@
 | :-- | :-- |
 | **Status** | **Accepted and implemented** in v0.3.0.2, as the final extension to the design 0001 work. Grounding recorded as it was gathered, before any code was written. |
 | **Release** | v0.3.0.2 |
-| **Why** | CP3 shipped root-scoped governance sessions in the LangChain adapter. `SessionManager` still assumes one active session per `agent_id`, so opening root B force-closes root A. The adapter trace stays correct, but root isolation does not hold at the registry. |
-| **Does not amend** | Design 0001, which is frozen at `765ab57`. This is a separate surface. |
-| **Grounded against** | `sentience_governor` @ `e179008` (v0.3.0.1) plus the CP3 adapter patch, read-only, 2026-08-20 |
+| **Why** | Design 0001 scoped governance sessions to the root invocation in the LangChain adapter. `SessionManager` still assumed one active session per `agent_id`, so opening root B force-closed root A. The adapter trace stayed correct, but root isolation did not hold at the registry. |
+| **Does not amend** | Design 0001, which was already accepted. This is a separate surface. |
+| **Grounded against** | `sentience_governor` @ `e179008` (v0.3.0.1) plus the design 0001 adapter change, read-only, 2026-08-20 |
 
 ---
 

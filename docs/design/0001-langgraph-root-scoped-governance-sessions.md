@@ -209,7 +209,8 @@ one root, one branch-less scope, identical to today.
 fires, and everything is dropped with the root. No new eviction policy (§4.6).
 
 **Architecture unchanged.** Sessions, roots, ancestry and teardown are exactly as
-accepted in `b67d883`. This amends only where turn telemetry is stored.
+accepted in the preceding revision of this spec. This amends only where turn
+telemetry is stored.
 
 ### 4.2 Root resolution
 

@@ -11,7 +11,6 @@ few seconds.
 
 This script is NOT a test. It is intentionally non-deterministic and
 depends on two live credentials.
-for the full design, acceptance criteria, and verification protocol.
 
 Operator guardrail
 ------------------

@@ -83,7 +83,7 @@ Each should print a usage screen. If both print usage, you're installed and read
 
 Now that you're installed, follow the public quickstart:
 
-**[https://getsentience.ai/docs/quickstart/](https://getsentience.ai/docs/quickstart/)**
+**[Quickstart](./quickstart.md)**
 
 **Skip the "Install" section there.** You've already done it (with the
 TestPyPI command above, which is different from the public one). Every

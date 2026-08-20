@@ -1,4 +1,4 @@
-# Makefile — developer conveniences for sentience-gov-build.
+# Makefile — developer conveniences for sentience-governor.
 #
 # Targets:
 #   test            Run the full Python test suite. Fast, offline.

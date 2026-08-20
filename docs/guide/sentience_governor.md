@@ -77,7 +77,7 @@ pip install sentience-governor
 
 The `pip install` path is for venv-scoped library use only. For CLI usage, use pipx.
 
-See the [website install guide](https://getsentience.ai/docs/install/) for the canonical instructions.
+See the [install guide](../install.md) for the canonical instructions.
 
 ### Wrap a trivial fake tool
 
