@@ -5,6 +5,65 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.0.2] — 2026-08-20
+
+**Patch release.** Under LangGraph, one agent run was split across several
+governance sessions, and every session after the first reported a policy
+violation on tools the caller had declared. This release scopes governance
+state to the root invocation, so one run produces one session and the
+violation stops firing.
+
+### Fixed
+- **A declared tool no longer reports POL-001 under LangGraph.** LangGraph
+  fires chain-level callbacks once per graph *and* once per node. The
+  LangChain callback handler kept one session in instance attributes and
+  replaced it on every `on_chain_start`, so a single `.invoke()` opened
+  several sessions. Only the first received an intent baseline; the rest
+  evaluated every tool call against a null baseline and raised POL-001 on
+  tools that were in fact declared. Governance state is now keyed by root
+  invocation: a session is created only for a root start, and a nested start
+  records ancestry and nothing else.
+- **Governance survives a nested chain end.** Nested `on_chain_end` callbacks
+  arrive before the outer one and used to tear the session down while the
+  graph was still running, leaving every later tool call ungoverned. Teardown
+  is now keyed on the ending run and only ends that run.
+- **Tool events attribute to the correct run.** Tool callbacks are parented to
+  the *node*, not to the root, so a single-hop parent check resolved to the
+  wrong place. Attribution now walks the parent chain to the owning root, and
+  an event that resolves to no root is skipped rather than attached to an
+  arbitrary session.
+- **Token usage, model, provider and `llm_turn_id` no longer cross between
+  concurrent runs or between parallel branches of one graph.** Per-turn
+  telemetry was held in single instance slots. Two parallel nodes of one graph
+  have genuinely overlapping LLM turns, so a later-finishing branch could
+  inherit an earlier branch's turn id while carrying its own usage and model —
+  a record that is internally consistent-looking but wrong. Turn telemetry is
+  now scoped per branch.
+- **A second run for the same agent no longer closes the first.** The session
+  registry allowed one active session per `agent_id` and force-closed the
+  previous one, which ended a session that was still running. The registry now
+  tracks a set of live sessions per agent, and closing one leaves the others
+  active.
+
+### Changed
+- **`SessionManager.session_start` takes `allow_concurrent`, defaulting to
+  `False`.** The default preserves existing behaviour exactly, including
+  force-closing a prior session, which is how a single-agent-per-process
+  runtime reclaims a session left open by a crashed run. Only the LangChain
+  handler opts in.
+- **One callback handler may now be shared across overlapping runs.** All
+  mutable execution state is keyed by root invocation, so concurrent runs on
+  threads or on one event loop cannot exchange sessions or telemetry.
+- **README: "Full docs" now points at the documentation in this repository**
+  rather than the deployed site, which is a separate surface that may not stay
+  in step with the source here.
+
+### Unchanged
+- Policy semantics, scope evaluation, the event schema and the cache schema
+  are untouched. A genuinely undeclared tool still raises POL-001.
+- Callers that drive the handler without callback run ids — including every
+  pre-existing integration and test — behave exactly as before.
+
 ## [0.3.0.1] — 2026-08-04
 
 **Patch release.** The MCP server was broken on every new install of the

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sentience-governor"
-version = "0.3.0.1"
+version = "0.3.0.2"
 description = "Local-first governance for AI agents at runtime. Records supported agent actions at the execution boundary, evaluates them against declared intent, scope, and policy, and surfaces violations in a verifiable local trail."
 requires-python = ">=3.10"
 license = "Apache-2.0"
@@ -47,8 +47,8 @@ dependencies = [
 
 [project.urls]
 Homepage = "https://getsentience.ai"
-Documentation = "https://getsentience.ai/docs/"
-Changelog = "https://getsentience.ai/docs/changelog/"
+Documentation = "https://github.com/crescerelabs/sentience-governor/blob/main/docs/index.md"
+Changelog = "https://github.com/crescerelabs/sentience-governor/blob/main/CHANGELOG.md"
 Repository = "https://github.com/crescerelabs/sentience-governor"
 Issues = "https://github.com/crescerelabs/sentience-governor/issues"
 

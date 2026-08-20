@@ -1,9 +1,8 @@
----
-title: Install (pre-release / early-access testers)
-description: Install instructions for non-public pre-release builds hosted on TestPyPI.
-sidebar:
-  hidden: true
----
+# Install (pre-release / early-access testers)
+
+> Install instructions for non-public pre-release builds hosted on TestPyPI.
+> Deliberately not linked from the documentation index: it is handed out
+> directly to testers, not part of normal navigation.
 
 ## What this is
 
@@ -84,7 +83,7 @@ Each should print a usage screen. If both print usage, you're installed and read
 
 Now that you're installed, follow the public quickstart:
 
-**[https://getsentience.ai/docs/quickstart/](https://getsentience.ai/docs/quickstart/)**
+**[Quickstart](./quickstart.md)**
 
 **Skip the "Install" section there.** You've already done it (with the
 TestPyPI command above, which is different from the public one). Every

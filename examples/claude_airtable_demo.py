@@ -11,7 +11,6 @@ few seconds.
 
 This script is NOT a test. It is intentionally non-deterministic and
 depends on two live credentials.
-for the full design, acceptance criteria, and verification protocol.
 
 Operator guardrail
 ------------------
@@ -229,7 +228,7 @@ class ToolDispatcher:
 # id on every Anthropic call (see while-loop below); every tool call
 # that fires from that turn shares the same turn id, so downstream
 # consumers can dedupe by ``(session_id, llm_turn_id)`` before summing
-# token counts. See userdocs/sentience_governor.md "Token tracking
+# token counts. See docs/guide/sentience_governor.md "Token tracking
 # (optional)" for the full aggregation contract.
 _TURN_CONTEXT: dict = {
     "response": None,  # the last anthropic.Message

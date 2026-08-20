@@ -104,7 +104,7 @@ sentience profile edit       # tune it in $EDITOR
 
 The profile shapes three things: when undeclared intent is surfaced, when the agent has crossed a task boundary (directory shift, file-type shift, read-to-write transition, time gap), and which tools should be treated as high-consequence (operator-authored regex patterns). All signals are observational; nothing is blocked.
 
-If you skip this step, sessions still capture exactly as v0.2.4 — the profile is strictly additive. See the [user guide §11](https://github.com/crescerelabs/sentience-governor/blob/main/userdocs/sentience_governor.md#11-governance-profiles) for the schema reference, CLI verbs, and a runnable closed-loop example.
+If you skip this step, sessions still capture exactly as v0.2.4 — the profile is strictly additive. See the [user guide §11](https://github.com/crescerelabs/sentience-governor/blob/main/docs/guide/sentience_governor.md#11-governance-profiles) for the schema reference, CLI verbs, and a runnable closed-loop example.
 
 ### Step 5 (optional) — Analyze a session
 
@@ -114,7 +114,7 @@ Once you have a session, you can run a derived-metric analyzer over it:
 sentience analyze undeclared-intent --latest
 ```
 
-This shows how much compute in the session was attributed to reasoning turns that touched execution outside the session's declared operational intent. On Claude Code sessions with the `SessionEnd` hook wired, token attribution is available and the analyzer can show per-turn breakdowns. If you see `no_token_data`, rerun `sentience init claude-code`, start a new Claude Code session, and try again. When a profile is loaded, the analyzer also surfaces three new sections: Profile (fingerprint), High-consequence operations, and Task boundaries crossed. See the [user guide §10](https://github.com/crescerelabs/sentience-governor/blob/main/userdocs/sentience_governor.md#10-analyzers--derived-metrics-over-captured-traces) for the full guide and the JSON output schema.
+This shows how much compute in the session was attributed to reasoning turns that touched execution outside the session's declared operational intent. On Claude Code sessions with the `SessionEnd` hook wired, token attribution is available and the analyzer can show per-turn breakdowns. If you see `no_token_data`, rerun `sentience init claude-code`, start a new Claude Code session, and try again. When a profile is loaded, the analyzer also surfaces three new sections: Profile (fingerprint), High-consequence operations, and Task boundaries crossed. See the [user guide §10](https://github.com/crescerelabs/sentience-governor/blob/main/docs/guide/sentience_governor.md#10-analyzers--derived-metrics-over-captured-traces) for the full guide and the JSON output schema.
 
 ### Step 6 (recommended) — Run your first pulse
 
@@ -138,7 +138,7 @@ Since v0.2.9 the pulse also shows **tool calls** (total, the four operation clas
 
 Each section ends with a one-line "Why it matters" translation, so the report reads cold — paste it into an issue, a Slack message, an advisor update, or a customer / investor proof point without context from the operator who ran the session. For a fresh-operator first session (default profile, well-behaved agent) you'll usually see status `ok` with no policy violations and an Interpretation block that names the recurring-value point explicitly: *your session was observable, your profile was loaded, and no policy rules fired.*
 
-The Markdown report's footer includes a one-line email-list sign-up prompt (suppress globally with `SENTIENCE_NO_SYNC_PROMPT=1`). See the [user guide §12](https://github.com/crescerelabs/sentience-governor/blob/main/userdocs/sentience_governor.md#12-sentience-pulse) for the full walkthrough plus three pre-rendered showcase scenarios (clean / missing-intent / mixed-violations).
+The Markdown report's footer includes a one-line email-list sign-up prompt (suppress globally with `SENTIENCE_NO_SYNC_PROMPT=1`). See the [user guide §12](https://github.com/crescerelabs/sentience-governor/blob/main/docs/guide/sentience_governor.md#12-sentience-pulse) for the full walkthrough plus three pre-rendered showcase scenarios (clean / missing-intent / mixed-violations).
 
 ---
 

@@ -6,8 +6,37 @@ that wrap any LangChain agent:
 - `SentienceCallbackHandler` — drop-in callback that hooks
   `on_chain_start`, `on_llm_start`, `on_tool_*`, and `on_chain_end`
   to emit governance events.
-- `SentienceMiddleware` — wrapper around `create_react_agent` that
-  installs the callback handler with no boilerplate.
+- `SentienceMiddleware` — agent middleware that wraps tool calls and,
+  optionally, LangGraph steps, so tool activity is governed without
+  wiring the callback yourself.
+
+## Sessions and concurrency
+
+**One run, one session.** A single agent invocation produces a single
+governance session, including under LangGraph, where the framework
+fires chain-level callbacks once for the graph and once for every node.
+Nested structure is recorded as structure, not as extra sessions.
+
+That is what keeps the trace honest about you: each session carries its
+own declared-intent baseline, so a tool inside your declared
+capabilities is evaluated against that baseline however deeply the
+graph nests it. A tool you never declared still reports POL-001.
+
+**One handler can serve overlapping runs.** Two invocations in flight at
+once — on threads or on one event loop — get separate sessions, and
+neither can pick up the other's token usage, model, provider or turn
+id. The same isolation holds between parallel branches inside a single
+graph.
+
+Two limits to know. `SentienceMiddleware` gets no run identifiers from
+LangChain, so it remains **one middleware instance per agent run**; with
+more than one run open it reports a governance error rather than
+guessing which run a tool call belongs to. And a tool event that cannot
+be traced to a known run is skipped rather than filed under an
+arbitrary session.
+
+For the mechanics behind this, see §6 of the
+[user guide](../guide/sentience_governor.md).
 
 ## How profiles plug in
 
@@ -50,5 +79,5 @@ continue to work — they list the values as unknown strings in
   a profile is added; the only difference is the trace gets richer.
 
 For the full LangChain integration walkthrough (intent declaration,
-classification metadata, etc.) see §6 of the user guide at
-`userdocs/sentience_governor.md`.
+classification metadata, etc.) see §6 of the
+[user guide](../guide/sentience_governor.md).

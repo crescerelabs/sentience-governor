@@ -39,8 +39,18 @@ Trace = all events for a session
 - **[Install](./install.md)** — get the CLI on your machine.
 - **[Quickstart](./quickstart.md)** — from zero to your first trace in three minutes.
 - **[Commands](./commands.md)** — reference for every CLI command.
+- **[Governance profiles](./profile.md)** — tell the Governor what you expect of an agent.
 - **[Troubleshooting](./troubleshooting.md)** — common issues and their fixes.
 - **[Changelog](./changelog.md)** — what changed, and when.
+
+### Integrations
+
+- **[LangChain](./integrations/langchain.md)** — callback handler and middleware.
+- **[MCP](./integrations/mcp.md)** — wrapping an MCP-style client.
+
+### Going deeper
+
+- **[User guide](./guide/sentience_governor.md)** — the full operator manual: concepts, every integration, the classification hook, analyzers, profiles, pulse, sinks, and limits.
 
 ### CLI tools you get
 

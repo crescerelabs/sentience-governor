@@ -26,7 +26,7 @@ Output:
     /tmp/v023-token-attribution-trace.jsonl  (the trace)
     Stdout: trace events + summary
 
-See ``userdocs/sentience_governor.md`` "Token tracking (optional)" →
+See ``docs/guide/sentience_governor.md`` "Token tracking (optional)" →
 "Aggregation warning" for the full rule, and
 the token-attribution contract for the
 attribution-identity design rationale.

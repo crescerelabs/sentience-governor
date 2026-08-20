@@ -23,7 +23,7 @@ What this demo proves
 - `CONTEXT_UNCLASSIFIED` + `POL-003` fire on every CONTEXT_SNAPSHOT
   event — the LangChain path does not currently support a
   classification hook, so all context arrives unclassified. This is
-  honest and expected. See userdocs §3.1 failure-first walkthrough.
+  honest and expected. See the user guide §3.1 failure-first walkthrough.
 
 What this demo deliberately does NOT do
 ---------------------------------------

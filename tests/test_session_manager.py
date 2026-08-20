@@ -90,3 +90,80 @@ class TestConcurrentSessions:
 
         assert results["sA"] == list(range(1, 11))
         assert results["sB"] == list(range(1, 11))
+
+
+class TestConcurrentSessionsPerAgent:
+    """v0.3.0.2 — one agent may hold several live sessions when the caller
+    opts in. Overlapping LangChain root invocations are governed through one
+    handler, so a second root is not a collision."""
+
+    @staticmethod
+    def _indexed(sm, agent_id):
+        """The agent's live-session set, or None when the agent is not indexed."""
+        return sm._agent_sessions.get(agent_id)
+
+    def test_allow_concurrent_keeps_both_sessions_live(self):
+        sm = SessionManager()
+        sm.session_start(session_id="sA", agent_id="agent-1", allow_concurrent=True)
+        sm.session_start(session_id="sB", agent_id="agent-1", allow_concurrent=True)
+
+        assert sm.get_state("sA") == SessionState.ACTIVE
+        assert sm.get_state("sB") == SessionState.ACTIVE
+        assert self._indexed(sm, "agent-1") == {"sA", "sB"}
+
+    def test_allow_concurrent_fires_no_force_close_callback(self):
+        forced = []
+        sm = SessionManager(on_session_force_closed=lambda s, a: forced.append(s))
+        sm.session_start(session_id="sA", agent_id="agent-1", allow_concurrent=True)
+        sm.session_start(session_id="sB", agent_id="agent-1", allow_concurrent=True)
+        assert forced == [], "concurrent starts must not force-close anything"
+
+    def test_ending_a_leaves_b_active_and_indexed(self):
+        sm = SessionManager()
+        sm.session_start(session_id="sA", agent_id="agent-1", allow_concurrent=True)
+        sm.session_start(session_id="sB", agent_id="agent-1", allow_concurrent=True)
+
+        sm.session_end("sA")
+
+        assert sm.get_state("sA") == SessionState.CLOSED
+        assert sm.get_state("sB") == SessionState.ACTIVE, \
+            "ending one session must not close a concurrently live one"
+        assert self._indexed(sm, "agent-1") == {"sB"}, \
+            "the surviving session must remain indexed for its agent"
+
+    def test_ending_the_last_session_removes_the_agent_from_the_index(self):
+        sm = SessionManager()
+        sm.session_start(session_id="sA", agent_id="agent-1", allow_concurrent=True)
+        sm.session_start(session_id="sB", agent_id="agent-1", allow_concurrent=True)
+
+        sm.session_end("sA")
+        sm.session_end("sB")
+
+        assert self._indexed(sm, "agent-1") is None, \
+            "an agent with no live sessions must leave nothing in the index"
+
+    def test_default_closes_every_live_session_not_just_one(self):
+        """The default path must be deterministic across the whole set: with
+        several sessions live, starting a non-concurrent one closes them all."""
+        forced = []
+        sm = SessionManager(on_session_force_closed=lambda s, a: forced.append(s))
+        sm.session_start(session_id="sA", agent_id="agent-1", allow_concurrent=True)
+        sm.session_start(session_id="sB", agent_id="agent-1", allow_concurrent=True)
+        sm.session_start(session_id="sC", agent_id="agent-1", allow_concurrent=True)
+
+        sm.session_start(session_id="sD", agent_id="agent-1")  # default
+
+        for closed in ("sA", "sB", "sC"):
+            assert sm.get_state(closed) == SessionState.CLOSED, \
+                f"{closed} must be force-closed, not left behind"
+        assert sm.get_state("sD") == SessionState.ACTIVE
+        assert self._indexed(sm, "agent-1") == {"sD"}
+        assert forced == ["sA", "sB", "sC"], \
+            "every prior session is force-closed, in a deterministic order"
+
+    def test_default_still_isolates_different_agents(self):
+        sm = SessionManager()
+        sm.session_start(session_id="sA", agent_id="agent-1")
+        sm.session_start(session_id="sB", agent_id="agent-2")
+        assert sm.get_state("sA") == SessionState.ACTIVE
+        assert sm.get_state("sB") == SessionState.ACTIVE

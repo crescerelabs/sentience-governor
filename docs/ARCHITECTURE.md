@@ -1,7 +1,7 @@
 # Sentience Governor — Architecture
 
 > Long-form architecture reference for `sentience-governor` v0.2.5.1.
-> For the user-facing quickstart and CLI reference, see [userdocs/sentience_governor.md](../userdocs/sentience_governor.md).
+> For the user-facing quickstart and CLI reference, see [docs/guide/sentience_governor.md](./guide/sentience_governor.md).
 > For release history, see [CHANGELOG.md](../CHANGELOG.md).
 
 ---
@@ -369,7 +369,7 @@ Honesty about scope limits is load-bearing.
 Repository:
 - [README.md](../README.md) — quickstart and install
 - [CHANGELOG.md](../CHANGELOG.md) — release history (v0.2.5 governance profile, v0.2.5.1 first-run copy patch)
-- [userdocs/sentience_governor.md](../userdocs/sentience_governor.md) — user documentation
+- [docs/guide/sentience_governor.md](./guide/sentience_governor.md) — user documentation
 - [examples/showcase/v025-closed-loop/](../examples/showcase/v025-closed-loop/) — runnable end-to-end example
 
 Substack:

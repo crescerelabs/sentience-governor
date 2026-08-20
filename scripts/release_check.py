@@ -13,6 +13,7 @@ Exits non-zero on any failed gate. Gate map (Airtable order -> check):
     1   tests pass               -> pytest
     4   pyproject version        -> readable + mentioned in CHANGELOG
     7   CHANGELOG entry          -> "[<version>]" heading present
+    8   user changelog entry     -> "## <version>" heading in docs/changelog.md
     10  public docs accurate     -> forbidden-surface grep: a removed/renamed
                                     surface must NOT appear as ACTIVE in
                                     user-facing docs or build tooling
@@ -22,8 +23,12 @@ Exits non-zero on any failed gate. Gate map (Airtable order -> check):
     16  LICENSE in wheel         -> dist-info/licenses/LICENSE present
 
 The gate-10 patterns live in scripts/release_check_forbidden.txt — update that
-file each release when a surface is removed or renamed. That is the check that
-would have caught the v0.2.8.3 website-docs miss.
+file each release when a surface is removed or renamed.
+
+Gates 4 and 7 read the ROOT CHANGELOG.md only. Gate 8 exists because that was
+not enough: the user-facing docs/changelog.md fell two releases behind and ended
+up describing a removed command as though it still shipped, with every gate
+green. A surface nothing checks is a surface that rots.
 """
 from __future__ import annotations
 
@@ -38,13 +43,23 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 PY = sys.executable
 
-# User-facing surfaces scanned by the gate-10 forbidden grep. Changelog files
-# are EXEMPT (a changelog is a historical record). Build tooling is included so
-# a removed CLI can't linger in the Makefile/scripts.
-DOC_GLOBS = ["README.md", "userdocs/**/*.md", "docs/website/**/*.md",
-             "Makefile", "scripts/*.py"]
-EXEMPT_NAMES = {"changelog.md", "CHANGELOG.md", "release_check.py",
-                "check_public_surface.py"}
+# ACTIVE user-facing surfaces scanned by the gate-10 forbidden grep. Scoped
+# deliberately: docs/design/** is historical design material describing what
+# was true when a change was made, so it is not swept for currency. Build
+# tooling is included so a removed CLI can't linger in the Makefile/scripts.
+DOC_GLOBS = ["README.md", "docs/*.md", "docs/integrations/**/*.md",
+             "docs/guide/**/*.md", "Makefile", "scripts/*.py"]
+# Exemptions are PATH-specific, not filename-wide. Both changelogs are exempt
+# from THIS grep because a changelog legitimately records what a past release
+# shipped: the v0.2.8 entry naming `sentience-sync` is accurate history, not a
+# stale claim. What went wrong before was not the exemption but that nothing
+# else checked the user-facing changelog at all — gate 8 now does, so an entry
+# documenting a removal is required rather than hoped for.
+#
+# Naming exact paths, rather than matching any file called changelog.md, keeps
+# a future docs/<something>/changelog.md from inheriting the exemption silently.
+EXEMPT_PATHS = {"CHANGELOG.md", "docs/changelog.md",
+                "scripts/release_check.py", "scripts/check_public_surface.py"}
 # A line may mention a forbidden term if it is clearly removal/sunset context.
 LINE_ALLOW = re.compile(r"sunset|removed|no longer|deprecat|former", re.I)
 
@@ -107,6 +122,23 @@ def main():
     # gate 7 — changelog entry
     gate(7, "CHANGELOG entry for this version", bool(version) and f"[{version}]" in changelog)
 
+    # gate 8 — the USER-FACING changelog must cover this version too.
+    #
+    # Root CHANGELOG.md and docs/changelog.md drifted apart for two releases
+    # because nothing checked the second one: gates 4 and 7 only ever read the
+    # root file. The user-facing page ended up describing a removed command as
+    # though it still shipped. This gate is what stops that recurring.
+    user_changelog = ROOT / "docs" / "changelog.md"
+    if user_changelog.exists():
+        text = user_changelog.read_text()
+        ok = bool(version) and re.search(rf"^##\s+{re.escape(version)}\b",
+                                         text, re.M) is not None
+        gate(8, "user-facing changelog entry for this version (docs/changelog.md)",
+             ok, f"no '## {version}' heading in docs/changelog.md")
+    else:
+        gate(8, "user-facing changelog entry for this version (docs/changelog.md)",
+             False, "docs/changelog.md is missing")
+
     # gate 10 — forbidden-surface grep
     pats = [re.compile(p) for p in forbidden_patterns()]
     hits = []
@@ -115,7 +147,7 @@ def main():
         for g in DOC_GLOBS:
             for p in glob.glob(str(ROOT / g), recursive=True):
                 f = Path(p)
-                if f.name in EXEMPT_NAMES or f in seen:
+                if str(f.relative_to(ROOT)) in EXEMPT_PATHS or f in seen:
                     continue
                 seen.add(f)
                 try:

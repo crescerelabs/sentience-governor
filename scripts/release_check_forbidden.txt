@@ -1,15 +1,28 @@
 # release_check gate-10 forbidden-surface patterns (one regex per line).
 #
-# A match in user-facing docs (README.md, userdocs/, docs/website/) or build
-# tooling (Makefile, scripts/) FAILS gate 10 — UNLESS the line is removal/sunset
-# context (see LINE_ALLOW in release_check.py: sunset|removed|no longer|
-# deprecat|former). changelog files are exempt entirely (historical record).
+# A match in ACTIVE user-facing docs (README.md, docs/*.md, docs/integrations/,
+# docs/guide/) or build tooling (Makefile, scripts/) FAILS gate 10 — UNLESS the
+# line is removal/sunset context (see LINE_ALLOW in release_check.py:
+# sunset|removed|no longer|deprecat|former).
+#
+# Only the ROOT CHANGELOG.md is exempt, as a historical record. docs/changelog.md
+# is an ACTIVE surface and is scanned: a blanket filename exemption is what let a
+# removed command keep being described as though it shipped.
+#
+# Patterns must match a BARE mention, not only a command-with-subcommand form.
+# `sentience-sync <subcommand>` alone missed "the four commands ... sentience-sync
+# ... available on your $PATH", which is exactly the claim that must fail.
+#
+# The lookbehind below is load-bearing: the "Sentience Sync" EMAIL LIST at
+# getsentience.ai/sentience-sync is a separate, still-available surface that
+# happens to share the name of the removed CLI. Matching it would fail the gate
+# on a true statement.
 #
 # Update this file each release when a surface is removed or renamed: add the
 # patterns that must no longer appear as an *active* feature.
 #
-# --- v0.2.8.3: Sync cloud telemetry sunset ---
-sentience-sync (init|register|run|status|aggregate|update-check)
+# --- v0.2.8.3 sunset / v0.3.0.1 removal: Sync cloud telemetry CLI ---
+(?<!getsentience\.ai/)sentience-sync\b
 Sentience Cloud
 aggregated rule-fire counts
 aggregated counts

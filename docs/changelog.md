@@ -6,6 +6,28 @@ Breaking changes bump the minor version until 1.0. After 1.0, breaking changes b
 
 ---
 
+## 0.3.0.2 — 2026-08-20
+
+**One governance session per run, under LangGraph.** LangGraph fires chain-level callbacks once for the graph and once for each node. The LangChain callback handler treated each of those as a new session, so a single run was split across several — and only the first carried an intent baseline. The rest evaluated every tool call against nothing, and reported POL-001 on tools you had declared. A nested end also tore the active session down while the outer graph was still running.
+
+One root invocation now produces one session. Nested starts and ends are recorded as structure, not as sessions, so a declared tool inside a nested graph reports cleanly. A genuinely undeclared tool still reports POL-001: the true positive is unchanged.
+
+Two isolation guarantees come with it. **One handler may be shared across overlapping runs** — two invocations in flight on threads or on one event loop get separate sessions, and neither can take the other's token usage, model, provider or `llm_turn_id`. The same holds between parallel branches inside a single graph, whose LLM turns genuinely overlap. Previously a second run for the same agent also closed the first one while it was still going; it no longer does.
+
+No change to the event schema, the trace format, or how scope is evaluated. Integrations that supply no callback run identifiers behave exactly as before. See the [LangChain integration](./integrations/langchain.md) page and §6 of the [user guide](./guide/sentience_governor.md).
+
+---
+
+## 0.3.0.1 — 2026-08-04
+
+**The MCP extra installs and runs again.** `pip install "sentience-governor[mcp]"` had been resolving a version of the MCP SDK that could not run the server: the extra declared an unbounded `mcp>=1.0`, and SDK 2.0.0 removed the module the server imports. Every fresh install of the extra was broken. The dependency is now bounded to `mcp>=1.0,<2`.
+
+When an unsupported version *is* already installed, the message now says so and names both the installed version and the supported range, instead of reporting a missing dependency and sending you to install something you already have. Remediation is also context-aware: a pipx-managed installation is no longer told to run an ambient `pip install` that cannot reach its environment.
+
+**`sentience-sync` is gone.** The experimental cloud-telemetry CLI was sunset in v0.2.8.3 and had remained as a stub printing a local-first notice. The stub and its entry point are removed, so **invoking `sentience-sync` now returns `command not found`.** Nothing else changes, and the separate "Sentience Sync" email list at `getsentience.ai/sentience-sync` is unrelated and still available.
+
+---
+
 ## 0.3.0 — 2026-07-17
 
 **Governance Claude can call.** An opt-in MCP server (`sentience-mcp-server`, `pip install "sentience-governor[mcp]"`) lets Claude call Sentience governance tools directly inside a session: `sentience_explain`, `sentience_profile_view`, the last-completed-session reads `sentience_pulse` / `sentience_intent` / `sentience_violations` (each names the session it read), the structural-only `sentience_session_status` (no live token claims: token analysis is unavailable until SessionEnd), and the one forward-looking write, `sentience_declare_intent(objective, scope)`. A declaration is recorded as a server-written, append-only `INTENT_DECLARED` event; subsequent matching activity then stops firing POL-001 at capture, while pre-declaration events keep theirs (non-retroactive). It is classified `intent_source = inferred` (agent-declared through MCP: content-untrusted, not integrator-vouched) and fails closed on any uncertain session binding. Register per project with `sentience init claude-code --mcp` (opt-in, stdio, local, no HTTP); see the flip with `sentience demo declare-intent`. Additive: no `schema_version` bump, no new event types, declaration-free capture byte-identical to v0.2.9.
@@ -211,7 +233,7 @@ sentience profile init             # create your first profile
 - **Profile fingerprint on every event.** The 12-character hex prefix of the profile's content hash. Operator can correlate any trace back to the profile that produced it. The field is omitted entirely on traces from sessions without a profile, so v0.2.4-shaped traces stay byte-identical under v0.2.5.
 - **Profile-aware analyzer report sections.** `sentience analyze undeclared-intent` gains three optional sections — Profile (fingerprint + schema version), High-consequence operations, Task boundaries crossed. Each section is omitted when its underlying field is empty, so v0.2.4-shaped traces produce byte-identical analyzer output.
 - **Closed-loop showcase.** A complete runnable embodiment of the loop — profile, agent recipe, generated trace, generated analyzer report, walkthrough — at `examples/showcase/v025-closed-loop/`. Companion script `examples/v025_closed_loop_demo.py` regenerates the trace and report deterministically.
-- **Userdocs §11 "Governance Profiles."** Full user-guide section covering what a profile is, how to create one, the schema, the CLI verbs, what firing looks like in the trace, and integration notes for LangChain and MCP. See [`userdocs/sentience_governor.md` §11](https://github.com/crescerelabs/sentience-governor/blob/main/userdocs/sentience_governor.md#11-governance-profiles).
+- **Userdocs §11 "Governance Profiles."** Full user-guide section covering what a profile is, how to create one, the schema, the CLI verbs, what firing looks like in the trace, and integration notes for LangChain and MCP. See [`docs/guide/sentience_governor.md` §11](https://github.com/crescerelabs/sentience-governor/blob/main/docs/guide/sentience_governor.md#11-governance-profiles).
 
 ### Changed
 
@@ -225,7 +247,7 @@ sentience profile init             # create your first profile
 - **Not cloud-required.** Profile lifecycle (author, validate, edit, export, import) runs entirely locally. No account, no API key, no network calls. `~/.sentience/profile.yaml` never leaves the machine; `sentience-sync` data flows are unchanged.
 - **Not profile inheritance yet.** The `extends` field is recognized and preserved in `validate()` output, but the runtime does not yet resolve inheritance chains. Reserved for a future release.
 
-See the [user guide §11](https://github.com/crescerelabs/sentience-governor/blob/main/userdocs/sentience_governor.md#11-governance-profiles) for the full walkthrough, schema reference, CLI commands, and the closed-loop example.
+See the [user guide §11](https://github.com/crescerelabs/sentience-governor/blob/main/docs/guide/sentience_governor.md#11-governance-profiles) for the full walkthrough, schema reference, CLI commands, and the closed-loop example.
 
 ---
 
@@ -262,7 +284,7 @@ pip install --upgrade sentience-governor   # if pip-in-venv
 - **Not a dashboard.** Single-session reports today; consolidated views across runs are downstream. See [getsentience.ai/launch-list](https://getsentience.ai/launch-list/) to be notified.
 - **Not a PDF report integration.** The PDF generator at `examples/sentience_business_report.py` (v0.2.3 cycle) is unchanged; the v0.2.4 metric is not surfaced through it. Consolidated visualization lands in future hosted surfaces.
 
-See [`userdocs/sentience_governor.md` §10](https://github.com/crescerelabs/sentience-governor/blob/main/userdocs/sentience_governor.md#10-analyzers--derived-metrics-over-captured-traces) for the full guide.
+See [`docs/guide/sentience_governor.md` §10](https://github.com/crescerelabs/sentience-governor/blob/main/docs/guide/sentience_governor.md#10-analyzers--derived-metrics-over-captured-traces) for the full guide.
 
 ---
 
@@ -296,7 +318,7 @@ pip install --upgrade sentience-governor   # if pip-in-venv
 - Not a token-budget enforcement feature.
 - Not a dashboard. The hosted console and downstream analytics ship separately — see [getsentience.ai/launch-list](https://getsentience.ai/launch-list/) to be notified.
 
-See [`userdocs/sentience_governor.md`](https://github.com/crescerelabs/sentience-governor/blob/main/userdocs/sentience_governor.md#token-tracking-optional-v023) "Token tracking (optional)" for the integration guide and the full aggregation contract.
+See [`docs/guide/sentience_governor.md`](https://github.com/crescerelabs/sentience-governor/blob/main/docs/guide/sentience_governor.md#token-tracking-optional-v023) "Token tracking (optional)" for the integration guide and the full aggregation contract.
 
 ---
 

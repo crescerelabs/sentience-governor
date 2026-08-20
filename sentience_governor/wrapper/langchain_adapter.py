@@ -13,12 +13,31 @@ Intent capture
 * Falls back to intent_source=none if no signal.
 
 v0 constraint: observe only.  SentienceMiddleware never blocks.
+
+v0.3.0.2 — root-scoped governance sessions
+------------------------------------------
+LangGraph fires chain-level callbacks once per graph AND once per node, so
+one ``.invoke()`` produces several ``on_chain_start`` / ``on_chain_end``
+pairs.  Governance state is therefore keyed by *root invocation* rather
+than held in single instance slots:
+
+* ``on_chain_start`` creates a session only when ``parent_run_id is None``.
+* ``on_chain_end`` tears down only the root whose ``run_id`` is ending.
+* Tool and LLM callbacks resolve their root by walking ``parent_run_id``
+  ancestry, because tool events parent to the *node*, not the root.
+* LLM turn telemetry is scoped per *branch* inside a root, because two
+  parallel nodes of one graph have overlapping LLM turns.
+
+See design 0001 for the measurements behind each of those rules.
 """
 
 from __future__ import annotations
 
 import logging
+import threading
 import uuid
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Union
 
 from sentience_governor.cache.cache import InProcessCache
@@ -27,9 +46,15 @@ from sentience_governor.profile import GovernanceProfile
 from sentience_governor.schema.events import (
     ClassificationSource,
     DeploymentMode,
+    ErrorType,
+    EventType,
+    GovernanceErrorPayload,
+    GovernanceEvent,
     IntentConfidence,
     IntentSource,
     OperationType,
+    PrimitiveType,
+    Severity,
 )
 from sentience_governor.session_manager.manager import SessionManager
 from sentience_governor.sink.writer import SinkWriter
@@ -39,6 +64,77 @@ from sentience_governor.wrapper.token_extraction import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class _Sentinel:
+    """Named singleton, so debugging output is readable."""
+
+    __slots__ = ("_name",)
+
+    def __init__(self, name: str) -> None:
+        self._name = name
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return self._name
+
+
+#: Root key used when the caller supplies no ``run_id``/``parent_run_id``.
+#: Direct callers of the callback surface (and the 32 pre-v0.3.0.2 adapter
+#: tests) never pass callback ids; they get exactly today's single-session
+#: behaviour through this key.  See design 0001 §4.5.
+_LEGACY_ROOT = _Sentinel("<legacy-root>")
+
+#: Returned by :meth:`SentienceCallbackHandler._bind_middleware_root` when
+#: two or more roots are open and the middleware — which carries no callback
+#: ids at all — cannot be attributed to one of them without guessing.
+_MIDDLEWARE_AMBIGUOUS = _Sentinel("<middleware-ambiguous>")
+
+#: Bound on an ancestry walk.  Guards against a malformed or cyclic parent
+#: chain; it is not a correctness parameter of the model.
+_MAX_HOPS = 64
+
+
+@dataclass
+class _TurnState:
+    """Pending telemetry for ONE LLM turn, scoped to ONE branch.
+
+    Lifecycle:
+      on_llm_start  -> reset every field in place, allocate a new turn id
+      on_llm_end    -> populate usage / model / provider, NEVER the turn id
+      on_tool_*     -> read, attach to the emitted CONTEXT_SNAPSHOT
+
+    Reset happens in place rather than by replacing the object so the
+    legacy compatibility views (``_pending_llm_*``) keep observing the
+    same scope across turns.
+    """
+
+    usage: Dict[str, Optional[int]] = field(
+        default_factory=lambda: {f: None for f in CANONICAL_TOKEN_FIELDS}
+    )
+    model: Optional[str] = None
+    provider: Optional[str] = None
+    turn_id: Optional[str] = None
+
+    def reset(self, turn_id: Optional[str]) -> None:
+        self.usage = {f: None for f in CANONICAL_TOKEN_FIELDS}
+        self.model = None
+        self.provider = None
+        self.turn_id = turn_id
+
+
+@dataclass
+class _RootState:
+    """Governance state belonging to ONE root invocation.
+
+    ``turn_scopes`` is keyed by branch — the ``parent_run_id`` shared by an
+    LLM turn and the tool calls of the same node.  The ``None`` key is the
+    root's default scope and is what flat chains and the legacy path use.
+    """
+
+    session_id: str
+    builder: EventBuilder
+    intent_emitted: bool = False
+    turn_scopes: Dict[Any, _TurnState] = field(default_factory=dict)
 
 
 class SentienceCallbackHandler:
@@ -53,6 +149,19 @@ class SentienceCallbackHandler:
 
         from langchain_core.callbacks import BaseCallbackHandler
         class MySentienceHandler(SentienceCallbackHandler, BaseCallbackHandler): ...
+
+    Concurrency
+    -----------
+    As of v0.3.0.2 **one handler instance may be shared across overlapping
+    invocations.**  All mutable execution state — session, builder, intent
+    baseline and LLM turn telemetry — is keyed by root invocation rather
+    than held on the instance, so two roots running at once on threads or
+    on one event loop cannot exchange sessions, token usage, model,
+    provider or ``llm_turn_id``.
+
+    This holds for the callback surface, which carries ``run_id`` and
+    ``parent_run_id``.  :class:`SentienceMiddleware` has no callback ids;
+    its concurrency story is unchanged and is documented on that class.
     """
 
     def __init__(
@@ -76,31 +185,127 @@ class SentienceCallbackHandler:
         self._vendor_id = vendor_id
         self._declared_capabilities = declared_capabilities or []
         self._owner_claim = owner_claim
-        self._session_id: Optional[str] = None
-        self._intent_emitted: bool = False
-        self._builder: Optional[EventBuilder] = None
 
-        # v0.2.3 Track 2 — per-LLM-turn pending state. Lifecycle:
-        #   on_llm_start  -> reset everything, allocate new turn id
-        #   on_llm_end    -> populate _pending_llm_usage / model / provider
-        #   on_tool_start -> read pending state, attach to emitted event
-        #
-        # Concurrency assumption (per plan §3.0.1): one handler instance
-        # per agent run / session. Sharing a single instance across
-        # concurrent runs would cause cross-run leakage of pending state.
-        # If shared instances are needed in the future, switch to
-        # contextvars.ContextVar — out of v0.2.3 scope.
-        #
-        # Trace immutability (per plan §3.2): if on_tool_start fires
-        # before on_llm_end has populated usage, the emitted event
-        # carries the current turn id (if on_llm_start ran) but NO
-        # token fields. We never mutate already-emitted events.
-        self._pending_llm_usage: Dict[str, Optional[int]] = {
-            field: None for field in CANONICAL_TOKEN_FIELDS
-        }
-        self._pending_llm_model: Optional[str] = None
-        self._pending_llm_provider: Optional[str] = None
-        self._pending_llm_turn_id: Optional[str] = None
+        # Root key -> that root's governance state.  The key is the root's
+        # run_id, or _LEGACY_ROOT when the caller supplies no callback ids.
+        self._roots: Dict[Any, _RootState] = {}
+        # run_id -> parent_run_id, for the ancestry walk.  Pruned with its
+        # root; there is deliberately no other eviction policy (design 0001
+        # §4.6 — evicting a live root would reintroduce the defect class
+        # this release removes).
+        self._ancestry: Dict[Any, Any] = {}
+        # RLock covers threads.  asyncio callbacks on one loop cannot
+        # interleave mid-method, so the lock is uncontended there.
+        self._lock = threading.RLock()
+
+        # The turn scope used when no callback ids are supplied. Held
+        # separately so it survives across on_chain_start boundaries the
+        # same way instance state did before v0.3.0.2 — on_chain_start has
+        # never reset pending LLM telemetry.
+        self._legacy_turn = _TurnState()
+
+    # ------------------------------------------------------------------
+    # Legacy compatibility views
+    # ------------------------------------------------------------------
+    #
+    # Before v0.3.0.2 pending LLM telemetry lived in four instance
+    # attributes.  They are now views onto the legacy branch scope, so the
+    # handler holds no mutable execution state of its own while callers
+    # that drive the handler without callback ids keep observing exactly
+    # what they observed before.
+
+    def _legacy_scope(self) -> _TurnState:
+        root = self._roots.get(_LEGACY_ROOT)
+        if root is None:
+            return self._legacy_turn
+        return root.turn_scopes.setdefault(None, self._legacy_turn)
+
+    @property
+    def _pending_llm_usage(self) -> Dict[str, Optional[int]]:
+        return self._legacy_scope().usage
+
+    @_pending_llm_usage.setter
+    def _pending_llm_usage(self, value: Dict[str, Optional[int]]) -> None:
+        self._legacy_scope().usage = value
+
+    @property
+    def _pending_llm_model(self) -> Optional[str]:
+        return self._legacy_scope().model
+
+    @_pending_llm_model.setter
+    def _pending_llm_model(self, value: Optional[str]) -> None:
+        self._legacy_scope().model = value
+
+    @property
+    def _pending_llm_provider(self) -> Optional[str]:
+        return self._legacy_scope().provider
+
+    @_pending_llm_provider.setter
+    def _pending_llm_provider(self, value: Optional[str]) -> None:
+        self._legacy_scope().provider = value
+
+    @property
+    def _pending_llm_turn_id(self) -> Optional[str]:
+        return self._legacy_scope().turn_id
+
+    @_pending_llm_turn_id.setter
+    def _pending_llm_turn_id(self, value: Optional[str]) -> None:
+        self._legacy_scope().turn_id = value
+
+    # ------------------------------------------------------------------
+    # Root and branch resolution
+    # ------------------------------------------------------------------
+
+    def _resolve_root(
+        self,
+        run_id: Any,
+        parent_run_id: Any,
+    ) -> Optional[_RootState]:
+        """Walk ``parent_run_id`` ancestry up to a known root.
+
+        A one-hop check is not enough: tool events parent to the node, not
+        to the root.  Returns ``None`` when nothing resolves — the caller
+        must then no-op rather than attach to an arbitrary session.
+        """
+        if run_id is None and parent_run_id is None:
+            return self._roots.get(_LEGACY_ROOT)
+        node = parent_run_id if parent_run_id is not None else run_id
+        hops = 0
+        while node is not None and node not in self._roots and hops < _MAX_HOPS:
+            node = self._ancestry.get(node)
+            hops += 1
+        if node is None:
+            return None
+        return self._roots.get(node)
+
+    def _branch_key(self, root: _RootState, parent_run_id: Any) -> Any:
+        """Resolve which branch scope a callback belongs to.
+
+        Walks up from ``parent_run_id`` so a tool nested deeper than its
+        node (a tool inside a sub-chain) still finds its branch.  Falling
+        back to the ``None`` key preserves flat-chain and legacy behaviour
+        exactly: one root, one branch-less scope.
+        """
+        node = parent_run_id
+        hops = 0
+        while (
+            node is not None
+            and node not in root.turn_scopes
+            and hops < _MAX_HOPS
+        ):
+            node = self._ancestry.get(node)
+            hops += 1
+        if node is not None and node in root.turn_scopes:
+            return node
+        return None
+
+    def _turn_for(
+        self,
+        root: _RootState,
+        parent_run_id: Any,
+    ) -> Optional[_TurnState]:
+        """The branch turn state a tool event should read, if any."""
+        return root.turn_scopes.get(self._branch_key(root, parent_run_id))
 
     # ------------------------------------------------------------------
     # LangChain callback surface
@@ -112,46 +317,62 @@ class SentienceCallbackHandler:
         inputs: Dict[str, Any],
         **kwargs: Any,
     ) -> None:
-        """Map to AGENT_REGISTERED; capture intent from inputs."""
-        self._session_id = str(uuid.uuid4())
-        # v0.2.5: load operator-authored governance profile if present.
-        # See mcp.py._start for full rationale.
-        profile = GovernanceProfile.from_default_path_or_none()
-        self._sm.session_start(
-            session_id=self._session_id,
-            agent_id=self._agent_id,
-            profile=profile,
-        )
-        self._cache.init_session(self._session_id)
-        self._builder = EventBuilder(
-            session_manager=self._sm,
-            cache=self._cache,
-            agent_id=self._agent_id,
-            session_id=self._session_id,
-            deployment_mode=self._deployment_mode,
-        )
+        """Map to AGENT_REGISTERED; capture intent from inputs.
 
-        # Emit AGENT_REGISTERED
-        event = self._builder.build_agent_registered(
-            agent_version=self._agent_version,
-            vendor_id=self._vendor_id,
-            declared_capabilities=self._declared_capabilities,
-            owner_claim=self._owner_claim,
-        )
-        if event:
-            self._sink.write(event, self._session_id)
+        Only a ROOT start (``parent_run_id is None``) opens a session.  A
+        nested start records ancestry and nothing else — LangGraph fires
+        one of these per node, and treating them as sessions is what
+        produced the false POL-001 this release removes.
+        """
+        run_id = kwargs.get("run_id")
+        parent_run_id = kwargs.get("parent_run_id")
 
-        # Attempt to capture intent from inputs
-        stated_objective = self._extract_intent(inputs)
-        self._emit_intent(stated_objective)
+        with self._lock:
+            if run_id is not None:
+                self._ancestry[run_id] = parent_run_id
+            if parent_run_id is not None:
+                return
+
+            key = run_id if run_id is not None else _LEGACY_ROOT
+            root = self._open_root(key)
+
+            # Emit AGENT_REGISTERED
+            event = root.builder.build_agent_registered(
+                agent_version=self._agent_version,
+                vendor_id=self._vendor_id,
+                declared_capabilities=self._declared_capabilities,
+                owner_claim=self._owner_claim,
+            )
+            if event:
+                self._sink.write(event, root.session_id)
+
+            # Attempt to capture intent from inputs
+            stated_objective = self._extract_intent(inputs)
+            self._emit_intent(root, stated_objective)
 
     def on_chain_end(self, outputs: Dict[str, Any], **kwargs: Any) -> None:
-        if not self._intent_emitted and self._builder:
-            self._emit_intent(None)
-        if self._session_id:
-            self._sink.session_closed(self._session_id, self._agent_id)
-            self._sm.session_end(self._session_id)
-            self._cache.clear_session(self._session_id)
+        """Tear down only the root that is ending.
+
+        A nested end resolves to no root and is a no-op.  Before
+        v0.3.0.2 it tore the session down while the outer graph was still
+        running, leaving every later tool call ungoverned.
+        """
+        run_id = kwargs.get("run_id")
+        key = run_id if run_id is not None else _LEGACY_ROOT
+
+        with self._lock:
+            root = self._roots.get(key)
+            if root is None:
+                return
+
+            if not root.intent_emitted:
+                self._emit_intent(root, None)
+            self._sink.session_closed(root.session_id, self._agent_id)
+            self._sm.session_end(root.session_id)
+            self._cache.clear_session(root.session_id)
+
+            del self._roots[key]
+            self._prune_ancestry(key)
 
     def on_llm_start(
         self,
@@ -159,69 +380,80 @@ class SentienceCallbackHandler:
         prompts: Any,
         **kwargs: Any,
     ) -> None:
-        """v0.2.3 Track 2 — turn-boundary reset.
+        """v0.2.3 Track 2 — turn-boundary reset, scoped to this branch.
 
-        Fires at the START of every LLM turn. Resets all pending state
-        from any prior turn so the new turn starts clean, and allocates
-        a fresh ``llm_turn_id`` that subsequent ``on_tool_start`` events
-        in this turn will attach to their emitted CONTEXT_SNAPSHOT.
+        Fires at the START of every LLM turn.  Resets that branch's
+        pending state and allocates a fresh ``llm_turn_id`` which the
+        branch's subsequent ``on_tool_start`` events attach to their
+        emitted CONTEXT_SNAPSHOT.
 
-        ``on_llm_end`` later in this turn populates the usage fields
-        without regenerating the turn id (the same id must persist
-        across all events from this turn so downstream consumers can
-        dedupe correctly — see plan §1.4 aggregation contract).
+        Another branch's turn is untouched — in this root or any other.
+        Two parallel nodes of one graph really do have overlapping LLM
+        turns, so a single pending slot would let one branch's turn id
+        land on another branch's tool event.
         """
-        self._pending_llm_usage = {field: None for field in CANONICAL_TOKEN_FIELDS}
-        self._pending_llm_model = None
-        self._pending_llm_provider = None
-        self._pending_llm_turn_id = uuid.uuid4().hex
+        run_id = kwargs.get("run_id")
+        parent_run_id = kwargs.get("parent_run_id")
+
+        with self._lock:
+            turn = self._turn_slot_for_llm(run_id, parent_run_id, create=True)
+            if turn is None:
+                return
+            turn.reset(uuid.uuid4().hex)
 
     def on_llm_end(self, response: Any, **kwargs: Any) -> None:
-        """v0.2.3 Track 2 — capture token usage from the LLM turn that's just ended.
+        """v0.2.3 Track 2 — capture token usage for the branch that ended.
 
-        Stores extracted canonical fields in instance state so any
-        subsequent ``on_tool_start`` events fired in this turn can
-        attach the same usage AND the same ``llm_turn_id`` (allocated
-        by ``on_llm_start``) to their emitted CONTEXT_SNAPSHOT.
+        Populates that branch's usage / model / provider so subsequent
+        ``on_tool_start`` events in the same branch attach the same usage
+        AND the same ``llm_turn_id``.
 
-        Defensive: any exception inside the extraction helper is
-        swallowed and pending usage falls back to all-None. Token
-        extraction must never break the agent's primary work.
+        Defensive: any exception inside extraction is swallowed and usage
+        falls back to all-None.  Token extraction must never break the
+        agent's primary work.
 
-        Note: we do NOT regenerate ``_pending_llm_turn_id`` here — it
-        was set by ``on_llm_start`` and must persist across every event
-        produced from this turn.
+        Note: the turn id is NOT regenerated here — it was allocated by
+        ``on_llm_start`` and must persist across every event produced from
+        this turn.  Writing usage into a *branch* scope rather than one
+        per-root slot is exactly what stops a later-finishing branch from
+        inheriting an earlier branch's turn id.
         """
-        try:
-            self._pending_llm_usage = extract_from_langchain_response(response)
-        except Exception:
-            logger.debug(
-                "extract_from_langchain_response raised; falling back to all-None",
-                exc_info=True,
-            )
-            self._pending_llm_usage = {
-                field: None for field in CANONICAL_TOKEN_FIELDS
-            }
+        run_id = kwargs.get("run_id")
+        parent_run_id = kwargs.get("parent_run_id")
 
-        # Defensive: model / provider extraction also exception-safe.
-        # A response object that explodes on getattr (custom __getattr__,
-        # mocking gone wrong) must not break the handler.
-        try:
-            self._pending_llm_model = self._extract_model_from_response(response)
-        except Exception:
-            logger.debug(
-                "_extract_model_from_response raised; falling back to None",
-                exc_info=True,
-            )
-            self._pending_llm_model = None
-        try:
-            self._pending_llm_provider = self._extract_provider_from_response(response)
-        except Exception:
-            logger.debug(
-                "_extract_provider_from_response raised; falling back to None",
-                exc_info=True,
-            )
-            self._pending_llm_provider = None
+        with self._lock:
+            turn = self._turn_slot_for_llm(run_id, parent_run_id, create=True)
+            if turn is None:
+                return
+
+            try:
+                turn.usage = extract_from_langchain_response(response)
+            except Exception:
+                logger.debug(
+                    "extract_from_langchain_response raised; falling back to all-None",
+                    exc_info=True,
+                )
+                turn.usage = {field: None for field in CANONICAL_TOKEN_FIELDS}
+
+            # Defensive: model / provider extraction also exception-safe.
+            # A response object that explodes on getattr (custom __getattr__,
+            # mocking gone wrong) must not break the handler.
+            try:
+                turn.model = self._extract_model_from_response(response)
+            except Exception:
+                logger.debug(
+                    "_extract_model_from_response raised; falling back to None",
+                    exc_info=True,
+                )
+                turn.model = None
+            try:
+                turn.provider = self._extract_provider_from_response(response)
+            except Exception:
+                logger.debug(
+                    "_extract_provider_from_response raised; falling back to None",
+                    exc_info=True,
+                )
+                turn.provider = None
 
     def on_tool_start(
         self,
@@ -230,48 +462,174 @@ class SentienceCallbackHandler:
         **kwargs: Any,
     ) -> None:
         """Emit INTENT_DECLARED (if not yet), SCOPE_ASSERTED, CONTEXT_SNAPSHOT."""
-        if not self._intent_emitted and self._builder:
-            self._emit_intent(None)
+        parent_run_id = kwargs.get("parent_run_id")
+        with self._lock:
+            root = self._resolve_root(kwargs.get("run_id"), parent_run_id)
+            if root is None:
+                # No resolvable root.  Never invent a session: silently
+                # attaching to an arbitrary one would produce exactly the
+                # false attribution this release exists to remove.
+                return
+            self._emit_tool_start(
+                root, serialized, input_str, self._turn_for(root, parent_run_id)
+            )
 
-        if not self._builder:
+    def on_tool_end(self, output: str, **kwargs: Any) -> None:
+        """Update CONTEXT_SNAPSHOT with tool output (classification unknown)."""
+        parent_run_id = kwargs.get("parent_run_id")
+        with self._lock:
+            root = self._resolve_root(kwargs.get("run_id"), parent_run_id)
+            if root is None:
+                return
+            self._emit_tool_end(
+                root, output, self._turn_for(root, parent_run_id)
+            )
+
+    # ------------------------------------------------------------------
+    # Root lifecycle
+    # ------------------------------------------------------------------
+
+    def _open_root(self, key: Any) -> _RootState:
+        """Create a session and governance state for one root invocation.
+
+        The ``_LEGACY_ROOT`` entry is replaced unconditionally, which is
+        precisely today's behaviour for callers that supply no callback
+        ids.
+        """
+        session_id = str(uuid.uuid4())
+        # v0.2.5: load operator-authored governance profile if present.
+        # See mcp.py._start for full rationale.
+        profile = GovernanceProfile.from_default_path_or_none()
+        self._sm.session_start(
+            session_id=session_id,
+            agent_id=self._agent_id,
+            profile=profile,
+            # One handler legitimately governs overlapping root
+            # invocations, so a second root for this agent is not a
+            # collision. Without this, opening root B would force-close
+            # root A's session while A is still running.
+            allow_concurrent=True,
+        )
+        self._cache.init_session(session_id)
+        builder = EventBuilder(
+            session_manager=self._sm,
+            cache=self._cache,
+            agent_id=self._agent_id,
+            session_id=session_id,
+            deployment_mode=self._deployment_mode,
+        )
+        root = _RootState(session_id=session_id, builder=builder)
+        if key is _LEGACY_ROOT:
+            # Pending LLM telemetry has never been reset by a chain start;
+            # carry the legacy scope across so it still is not.
+            root.turn_scopes[None] = self._legacy_turn
+        self._roots[key] = root
+        return root
+
+    def _prune_ancestry(self, key: Any) -> None:
+        """Drop the ancestry subtree of a root that has just torn down."""
+        if key is _LEGACY_ROOT:
             return
+        doomed = []
+        for node in self._ancestry:
+            cursor = node
+            hops = 0
+            while cursor is not None and hops < _MAX_HOPS:
+                if cursor == key:
+                    doomed.append(node)
+                    break
+                if cursor in self._roots:
+                    break
+                cursor = self._ancestry.get(cursor)
+                hops += 1
+        for node in doomed:
+            self._ancestry.pop(node, None)
+        self._ancestry.pop(key, None)
+
+    def _turn_slot_for_llm(
+        self,
+        run_id: Any,
+        parent_run_id: Any,
+        create: bool,
+    ) -> Optional[_TurnState]:
+        """The branch turn state an LLM callback should write.
+
+        An LLM turn and the tool calls of the same branch are siblings —
+        they share the node's ``run_id`` as ``parent_run_id`` — so the
+        branch, not the LLM run, is the scope key.
+        """
+        if run_id is None and parent_run_id is None:
+            # Legacy path.  Works even before any chain has started, which
+            # is how the handler behaved before v0.3.0.2.
+            return self._legacy_scope()
+
+        root = self._resolve_root(run_id, parent_run_id)
+        if root is None:
+            return None
+        key = self._branch_key(root, parent_run_id)
+        if key is None and parent_run_id is not None and create:
+            # First LLM event of this branch: open its scope.
+            key = parent_run_id
+        turn = root.turn_scopes.get(key)
+        if turn is None:
+            if not create:
+                return None
+            turn = _TurnState()
+            root.turn_scopes[key] = turn
+        return turn
+
+    # ------------------------------------------------------------------
+    # Emission, always against a resolved root
+    # ------------------------------------------------------------------
+
+    def _emit_tool_start(
+        self,
+        root: _RootState,
+        serialized: Dict[str, Any],
+        input_str: str,
+        turn: Optional[_TurnState],
+    ) -> None:
+        if not root.intent_emitted:
+            self._emit_intent(root, None)
 
         tool_name = serialized.get("name", "unknown_tool")
         operation_type = self._infer_operation_type(tool_name, input_str)
 
         # SCOPE_ASSERTED
-        scope_event = self._builder.build_scope_asserted(
+        scope_event = root.builder.build_scope_asserted(
             tool_id=tool_name,
             asserted_permissions=[operation_type.value.lower()],
             target_system=self._extract_target_system(tool_name),
             operation_type=operation_type,
         )
         if scope_event:
-            self._sink.write(scope_event, self._session_id)
+            self._sink.write(scope_event, root.session_id)
 
         # CONTEXT_SNAPSHOT — at tool call with incoming data.
-        # Attaches v0.2.3 Track 2 token-usage fields from the most
-        # recent LLM turn (populated by on_llm_end). When on_llm_end
-        # has not yet run for this turn (rare ordering — see plan §3.2
+        # Attaches v0.2.3 Track 2 token-usage fields from this BRANCH's
+        # most recent LLM turn (populated by on_llm_end). When on_llm_end
+        # has not yet run for that turn (rare ordering — see plan §3.2
         # immutability rule), all token fields are None and only the
         # turn id (if on_llm_start ran) is attached. Already-emitted
         # events are NEVER mutated retroactively.
-        ctx_event = self._builder.build_context_snapshot(
+        ctx_event = root.builder.build_context_snapshot(
             data_classifications=[],
             classification_source=ClassificationSource.unclassified,
             provenance=[tool_name],
             retention_flags=[],
             context_size_tokens=len(input_str.split()) * 2,
-            **self._token_kwargs(),
+            **self._token_kwargs(turn),
         )
         if ctx_event:
-            self._sink.write(ctx_event, self._session_id)
+            self._sink.write(ctx_event, root.session_id)
 
-    def on_tool_end(self, output: str, **kwargs: Any) -> None:
-        """Update CONTEXT_SNAPSHOT with tool output (classification unknown)."""
-        if not self._builder:
-            return
-        ctx_event = self._builder.build_context_snapshot(
+    def _emit_tool_end(
+        self,
+        root: _RootState,
+        output: str,
+        turn: Optional[_TurnState],
+    ) -> None:
+        ctx_event = root.builder.build_context_snapshot(
             data_classifications=[],
             classification_source=ClassificationSource.unclassified,
             provenance=["tool_output"],
@@ -280,28 +638,34 @@ class SentienceCallbackHandler:
             # Same turn id + usage — every event in the turn carries
             # the same attribution. Consumers dedupe by
             # (session_id, llm_turn_id) before summing token fields.
-            **self._token_kwargs(),
+            **self._token_kwargs(turn),
         )
         if ctx_event:
-            self._sink.write(ctx_event, self._session_id)
+            self._sink.write(ctx_event, root.session_id)
 
     # ------------------------------------------------------------------
     # v0.2.3 Track 2 — token-attribution helpers
     # ------------------------------------------------------------------
 
-    def _token_kwargs(self) -> Dict[str, Any]:
-        """Build keyword args for build_context_snapshot from pending state.
+    @staticmethod
+    def _token_kwargs(turn: Optional[_TurnState]) -> Dict[str, Any]:
+        """Build keyword args for build_context_snapshot from a turn scope.
+
+        Takes the resolved branch turn state explicitly: it must never
+        reach for handler state or guess which branch it belongs to.
 
         Returns the 5 numeric token fields + model + provider + turn id.
         Any field set to None on the result is dropped from the payload
         by the central serializer (per plan §1.3); no per-call filtering
         needed here.
         """
+        if turn is None:
+            turn = _TurnState()
         return {
-            **self._pending_llm_usage,
-            "model_identifier": self._pending_llm_model,
-            "provider": self._pending_llm_provider,
-            "llm_turn_id": self._pending_llm_turn_id,
+            **turn.usage,
+            "model_identifier": turn.model,
+            "provider": turn.provider,
+            "llm_turn_id": turn.turn_id,
         }
 
     @staticmethod
@@ -348,18 +712,82 @@ class SentienceCallbackHandler:
         return None
 
     # ------------------------------------------------------------------
+    # Middleware binding (see SentienceMiddleware)
+    # ------------------------------------------------------------------
+
+    def _bind_middleware_root(self) -> Any:
+        """Resolve the root a middleware-generated tool event belongs to.
+
+        The middleware carries no callback ids, so binding is by active-root
+        count rather than by ancestry:
+
+          exactly one root -> that root (the supported single-run case)
+          zero roots       -> the legacy entry, which may not exist
+          two or more      -> _MIDDLEWARE_AMBIGUOUS; do not guess
+        """
+        with self._lock:
+            active = [k for k in self._roots if k is not _LEGACY_ROOT]
+            if len(active) > 1:
+                return _MIDDLEWARE_AMBIGUOUS
+            if len(active) == 1:
+                return self._roots[active[0]]
+            return self._roots.get(_LEGACY_ROOT)
+
+    def _emit_middleware_ambiguity_error(self, tool_name: str) -> None:
+        """Report that a middleware tool event could not be attributed.
+
+        Emitted instead of a governance event, never alongside one.  The
+        tool call itself still proceeds — governance is observe-only.
+        """
+        payload = GovernanceErrorPayload(
+            error_type=ErrorType.INTERCEPT_FAILURE,
+            severity=Severity.warning,
+            failure_reason=(
+                "SentienceMiddleware tool call could not be attributed: "
+                f"{len([k for k in self._roots if k is not _LEGACY_ROOT])} "
+                f"root invocations are open and the middleware carries no "
+                f"run_id (tool={tool_name!r}). No governance event emitted."
+            ),
+            agent_continued=True,
+        )
+        event = GovernanceEvent(
+            event_id=str(uuid.uuid4()),
+            event_type=EventType.GOVERNANCE_ERROR,
+            session_id="",
+            event_sequence_number=0,
+            previous_event_id=None,
+            agent_id=self._agent_id,
+            deployment_mode=self._deployment_mode,
+            timestamp_utc=_now_utc(),
+            primitive=PrimitiveType.SYSTEM,
+            payload=payload,
+            advisory_flags=[],
+            policy_violations=[],
+            simulated_consequence=None,
+            pass_through=True,
+        )
+        self._sink.write(event, "")
+
+    # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
     def _emit_intent(
         self,
+        root: _RootState,
         stated_objective: Optional[str],
         source: IntentSource = IntentSource.inferred,
     ) -> None:
-        """Emit the INTENT_DECLARED event for this session.
+        """Emit the INTENT_DECLARED event for one root's session.
 
         Parameters
         ----------
+        root
+            The resolved root whose session receives the baseline. The
+            early return tests ``root.intent_emitted``, not instance
+            state — before v0.3.0.2 an instance flag survived the session
+            reset, so a newly created session could never receive a
+            baseline and its first tool call fired a false POL-001.
         stated_objective
             The objective string. If ``None``, the emitted event carries
             ``intent_source=none`` regardless of the ``source`` argument.
@@ -385,7 +813,7 @@ class SentienceCallbackHandler:
           machine-generated payload, or anything in between)
         * No objective supplied -> ``IntentConfidence.unknown``
         """
-        if self._intent_emitted or not self._builder:
+        if root.intent_emitted:
             return
         if stated_objective:
             confidence = (
@@ -397,7 +825,7 @@ class SentienceCallbackHandler:
             source = IntentSource.none
             confidence = IntentConfidence.unknown
 
-        event = self._builder.build_intent_declared(
+        event = root.builder.build_intent_declared(
             stated_objective=stated_objective,
             intent_source=source,
             intent_confidence=confidence,
@@ -405,8 +833,8 @@ class SentienceCallbackHandler:
             session_scope_hint=self._declared_capabilities,
         )
         if event:
-            self._sink.write(event, self._session_id)
-        self._intent_emitted = True
+            self._sink.write(event, root.session_id)
+        root.intent_emitted = True
 
     @staticmethod
     def _extract_intent(inputs: Dict[str, Any]) -> Optional[str]:
@@ -432,6 +860,11 @@ class SentienceCallbackHandler:
         return parts[0] if len(parts) > 1 else tool_name
 
 
+def _now_utc() -> str:
+    now = datetime.now(timezone.utc)
+    return now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond // 1000:03d}Z"
+
+
 class SentienceMiddleware:
     """Wraps tool calls via awrap_tool_call — observe only, never blocks.
 
@@ -447,6 +880,14 @@ class SentienceMiddleware:
     emitted through this middleware (the underlying handler still
     reports tokens through ``on_llm_end`` if that hook is wired to
     the same handler).
+
+    Concurrency (unchanged in v0.3.0.2)
+    -----------------------------------
+    LangChain hands this middleware no ``run_id``, so a middleware tool
+    event carries no ancestry to route on.  Binding is therefore by
+    active-root count and one middleware instance per agent run remains
+    the supported shape; per-step state below has the same assumption.
+    Making the middleware concurrency-safe is a separate redesign.
     """
 
     def __init__(self, handler: SentienceCallbackHandler) -> None:
@@ -473,48 +914,65 @@ class SentienceMiddleware:
         """Intercept tool call; emit governance events; never block.
 
         If ``awrap_step`` has populated step state for the current
-        LangGraph step, that state is mirrored onto the handler's
-        pending fields BEFORE the handler's ``on_tool_start`` fires —
-        so the emitted CONTEXT_SNAPSHOT carries the step-level
-        aggregated tokens + step turn id. If no step state is set
-        (handler used standalone, or step middleware not registered),
-        the handler's existing pending state (from ``on_llm_end``,
-        if wired) is used unchanged.
+        LangGraph step, that state is passed to the handler for THIS
+        CALL ONLY — so the emitted CONTEXT_SNAPSHOT carries the
+        step-level aggregated tokens + step turn id.  If no step state
+        is set (handler used standalone, or step middleware not
+        registered), the bound root's own branch state is used unchanged.
+
+        Step state is passed as an argument rather than written onto the
+        handler, so a step turn id cannot outlive its step by
+        construction: there is nothing to restore afterwards.
         """
         serialized = {"name": tool_name}
         input_str = str(tool_input)
 
-        # If awrap_step has populated step state, mirror it to the
-        # handler so the emitted event picks it up via the existing
-        # _token_kwargs() pathway. We snapshot+restore so this never
-        # leaks across calls when step state isn't set.
-        snapshot = self._snapshot_handler_pending_state()
-        try:
-            if self._current_step_turn_id is not None:
-                self._handler._pending_llm_usage = (
-                    self._current_step_usage
-                    if self._current_step_usage is not None
-                    else {field: None for field in CANONICAL_TOKEN_FIELDS}
-                )
-                self._handler._pending_llm_model = self._current_step_model
-                self._handler._pending_llm_provider = self._current_step_provider
-                self._handler._pending_llm_turn_id = self._current_step_turn_id
+        binding = self._handler._bind_middleware_root()
 
-            self._handler.on_tool_start(serialized, input_str)
-            try:
-                result = await next_call(tool_input)
-                self._handler.on_tool_end(str(result))
-                return result
-            except Exception:
-                # Fail-open: governance failure must never block agent
-                raise
-        finally:
-            # Restore handler state. Important when step state was set:
-            # the next tool call in the same step should read step state
-            # again from awrap_tool_call, NOT from a polluted handler.
-            # Without this, a turn id leaked into the handler would
-            # persist beyond the step's lifetime.
-            self._restore_handler_pending_state(snapshot)
+        if binding is _MIDDLEWARE_AMBIGUOUS:
+            # Two or more roots are open and nothing in the middleware
+            # call identifies which one. Attributing to an arbitrary root
+            # is the defect class this release removes, so report and
+            # emit no governance event. The tool still runs.
+            self._handler._emit_middleware_ambiguity_error(tool_name)
+            return await next_call(tool_input)
+
+        root = binding
+        turn = self._step_turn_state()
+        if root is not None and turn is None:
+            turn = self._handler._turn_for(root, None)
+
+        if root is not None:
+            self._handler._emit_tool_start(root, serialized, input_str, turn)
+        try:
+            result = await next_call(tool_input)
+        except Exception:
+            # Fail-open: governance failure must never block agent
+            raise
+        if root is not None:
+            self._handler._emit_tool_end(root, str(result), turn)
+        return result
+
+    def _step_turn_state(self) -> Optional[_TurnState]:
+        """This step's aggregated telemetry, or None when no step is active.
+
+        Usage is normalised to the canonical field set. ``awrap_step``
+        already produces exactly those keys, but step state is a public
+        attribute an integrator can set directly, and an unrecognised key
+        reaching the event builder would raise inside the tool path.
+        Governance must never break the agent's primary work.
+        """
+        if self._current_step_turn_id is None:
+            return None
+        supplied = self._current_step_usage or {}
+        return _TurnState(
+            usage={
+                field: supplied.get(field) for field in CANONICAL_TOKEN_FIELDS
+            },
+            model=self._current_step_model,
+            provider=self._current_step_provider,
+            turn_id=self._current_step_turn_id,
+        )
 
     async def awrap_step(
         self,
@@ -565,20 +1023,6 @@ class SentienceMiddleware:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
-
-    def _snapshot_handler_pending_state(self) -> Dict[str, Any]:
-        return {
-            "usage": dict(self._handler._pending_llm_usage),
-            "model": self._handler._pending_llm_model,
-            "provider": self._handler._pending_llm_provider,
-            "turn_id": self._handler._pending_llm_turn_id,
-        }
-
-    def _restore_handler_pending_state(self, snapshot: Dict[str, Any]) -> None:
-        self._handler._pending_llm_usage = snapshot["usage"]
-        self._handler._pending_llm_model = snapshot["model"]
-        self._handler._pending_llm_provider = snapshot["provider"]
-        self._handler._pending_llm_turn_id = snapshot["turn_id"]
 
     @staticmethod
     def _extract_new_ai_messages(state_in: Any, state_out: Any) -> List[Any]:

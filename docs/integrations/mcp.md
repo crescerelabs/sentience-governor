@@ -58,5 +58,5 @@ your job during profile authoring.
   integrations work unchanged; adding a profile only enriches the
   trace.
 
-For the full MCP integration walkthrough see §5 of the user guide
-at `userdocs/sentience_governor.md`.
+For the full MCP integration walkthrough see §5 of the
+[user guide](../guide/sentience_governor.md).

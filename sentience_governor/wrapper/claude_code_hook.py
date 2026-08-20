@@ -68,7 +68,7 @@ Every ``PostToolUse``::
 Intent stays ``intent_source=none`` / ``intent_confidence=unknown``
 throughout. Claude Code does not expose the user's prompt to hooks;
 fabricating intent would be dishonest. ``INTENT_MISSING`` fires.
-Matches the failure-first walkthrough in userdocs §3.1.
+Matches the failure-first walkthrough in the user guide §3.1.
 
 Fail-open discipline
 --------------------
@@ -132,7 +132,7 @@ logger = logging.getLogger(__name__)
 # free-tier operators from accumulating a single unbounded JSONL over
 # weeks of use. Each session's file caps at whatever that session
 # produces (typically a few MB); cleanup is a plain `find ... -mtime +N
-# -delete`. See userdocs §7.
+# -delete`. See the user guide §7.
 _DEFAULT_SINK_DIR = Path.home() / ".sentience" / "traces" / "claude-code"
 _FALLBACK_SINK_DIR = Path("/tmp/sentience-claude-code-traces")
 
