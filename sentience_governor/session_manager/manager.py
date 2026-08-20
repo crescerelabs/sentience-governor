@@ -17,7 +17,7 @@ import threading
 import time
 from contextlib import asynccontextmanager
 from enum import Enum
-from typing import AsyncIterator, Dict, Optional
+from typing import AsyncIterator, Dict, Optional, Set
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +82,13 @@ class SessionManager:
         on_session_force_closed: Optional[object] = None,  # callback(session_id, agent_id)
     ) -> None:
         self._sessions: Dict[str, _SessionEntry] = {}
-        self._agent_to_session: Dict[str, str] = {}  # agent_id → active session_id
+        # agent_id → the set of session ids currently live for that agent.
+        # v0.3.0.2: this was a single session id. Runtimes that place one
+        # agent in one process still hold at most one member; the LangChain
+        # adapter, which governs overlapping root invocations through one
+        # handler, opts into more via session_start(allow_concurrent=True).
+        # The agent key is removed once its set empties.
+        self._agent_sessions: Dict[str, Set[str]] = {}
         self._registry_lock = threading.RLock()
         self._inactivity_timeout = inactivity_timeout
         self._on_session_force_closed = on_session_force_closed
@@ -104,6 +110,7 @@ class SessionManager:
         initial_sequence: int = 0,
         initial_last_event_id: Optional[str] = None,
         profile: Optional[object] = None,
+        allow_concurrent: bool = False,
     ) -> None:
         """Transition session to ACTIVE.  Handles collision (force-close prior).
 
@@ -127,26 +134,47 @@ class SessionManager:
             policy evaluation. The profile is immutable for the session's
             lifetime; mid-session changes to ``~/.sentience/profile.yaml``
             do not affect any already-active session.
+        allow_concurrent
+            v0.3.0.2. When ``False`` (default), every session already live
+            for this agent is force-closed before the new one opens — the
+            behaviour every caller had before this parameter existed, and
+            the behaviour the single-agent-per-process runtimes rely on to
+            reclaim a session left ACTIVE by a crashed run.
+
+            When ``True``, sessions already live for this agent stay
+            active and the new one is added alongside them. Only the
+            LangChain adapter opts in: it governs overlapping root
+            invocations through one handler, so two live sessions for one
+            agent are legitimate rather than a collision.
         """
         with self._registry_lock:
-            # Collision: same agent_id already has an active session
-            prior_session_id = self._agent_to_session.get(agent_id)
-            if prior_session_id and prior_session_id != session_id:
-                prior = self._sessions.get(prior_session_id)
-                if prior and prior.state == SessionState.ACTIVE:
-                    logger.warning(
-                        "SESSION_FORCE_CLOSED: agent %s had active session %s; "
-                        "force-closing before starting %s",
-                        agent_id,
-                        prior_session_id,
-                        session_id,
-                    )
-                    self._force_close(prior)
-                    if self._on_session_force_closed:
-                        try:
-                            self._on_session_force_closed(prior_session_id, agent_id)
-                        except Exception:
-                            pass
+            if not allow_concurrent:
+                # Collision: this agent already has live sessions. Close
+                # ALL of them, in a deterministic order, rather than
+                # picking one member of the set.
+                prior_session_ids = sorted(
+                    sid
+                    for sid in self._agent_sessions.get(agent_id, ())
+                    if sid != session_id
+                )
+                for prior_session_id in prior_session_ids:
+                    prior = self._sessions.get(prior_session_id)
+                    if prior and prior.state == SessionState.ACTIVE:
+                        logger.warning(
+                            "SESSION_FORCE_CLOSED: agent %s had active session %s; "
+                            "force-closing before starting %s",
+                            agent_id,
+                            prior_session_id,
+                            session_id,
+                        )
+                        self._force_close(prior)
+                        if self._on_session_force_closed:
+                            try:
+                                self._on_session_force_closed(
+                                    prior_session_id, agent_id
+                                )
+                            except Exception:
+                                pass
 
             entry = _SessionEntry(
                 session_id=session_id, agent_id=agent_id, profile=profile
@@ -155,7 +183,7 @@ class SessionManager:
             entry.sequence_number = initial_sequence
             entry.last_event_id = initial_last_event_id
             self._sessions[session_id] = entry
-            self._agent_to_session[agent_id] = session_id
+            self._agent_sessions.setdefault(agent_id, set()).add(session_id)
 
     def session_end(self, session_id: str) -> None:
         """Transition session ACTIVE → CLOSING → CLOSED."""
@@ -227,8 +255,19 @@ class SessionManager:
         self._close_entry(entry)
 
     def _close_entry(self, entry: _SessionEntry) -> None:
+        """Close one session and de-index only that session.
+
+        Removes ``entry.session_id`` from its agent's live set, never the
+        agent key while other sessions remain — closing A must leave a
+        concurrently live B indexed and ACTIVE. The agent key is dropped
+        once its set empties, so an idle agent leaves nothing behind.
+        """
         entry.state = SessionState.CLOSED
-        self._agent_to_session.pop(entry.agent_id, None)
+        live = self._agent_sessions.get(entry.agent_id)
+        if live is not None:
+            live.discard(entry.session_id)
+            if not live:
+                self._agent_sessions.pop(entry.agent_id, None)
 
     def _reaper_loop(self) -> None:
         """Periodically close sessions that have exceeded inactivity timeout."""
