@@ -19,7 +19,13 @@ from pathlib import Path
 import pytest
 
 from sentience_governor import retro
-from sentience_governor.retro import interpret_target, scan
+from sentience_governor.retro import (
+    RootResolver,
+    interpret_target,
+    is_claude_config,
+    scan,
+    suppression_rule,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures" / "retro"
 
@@ -506,3 +512,413 @@ def test_declaration_activity_extraction(config_root):
     ])
     result = scan(config_root)
     assert result["sessions_with_declaration_activity"] == ["s-declared"]
+
+
+# ---------------------------------------------------------------------------
+# CP2 — root resolution (§5.4), suppression (§5.3), classification (§5.2/§5.5)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def home():
+    """The isolated $HOME for this test (plan §9 isolation requirement)."""
+    return Path(os.environ["HOME"])
+
+
+def git_repo(home: Path, name: str, *, as_file: bool = False) -> Path:
+    """A directory carrying real `.git` evidence, as directory or as file."""
+    repo = home / name
+    repo.mkdir(parents=True, exist_ok=True)
+    if as_file:
+        (repo / ".git").write_text("gitdir: /elsewhere/worktrees/x\n")
+    else:
+        (repo / ".git").mkdir(exist_ok=True)
+    return repo
+
+
+def scan_records(config_root: Path, records, **kwargs) -> dict:
+    write_records(transcript_dir(config_root) / "t.jsonl", records)
+    return scan(config_root, **kwargs)
+
+
+def write_block(path, tool: str = "Write") -> dict:
+    return {"name": tool, "input": {"file_path": str(path), "content": "c"}}
+
+
+def read_block(path) -> dict:
+    return {"name": "Read", "input": {"file_path": str(path)}}
+
+
+def classes(result) -> list:
+    return sorted(f.finding_class for f in result["findings"])
+
+
+def test_18_nested_cwds_in_one_repository(config_root, home):
+    """Plan test 18: nested cwds in one repository — one root; no
+    cross-project finding.
+
+    This is one of the two measured false-positive classes: real sessions
+    carry multiple cwd values inside one repository (6 observed in one
+    session), so per-record cwd is not a project boundary.
+    """
+    repo = git_repo(home, "repo")
+    (repo / "sub").mkdir()
+    result = scan_records(config_root, [
+        activity("s", cwd=str(repo), tools=[write_block(repo / "a.txt")]),
+        activity("s", cwd=str(repo / "sub"),
+                 tools=[write_block(repo / "sub" / "b.txt")]),
+    ])
+    assert result["findings"] == []
+    assert result["same_project_writes"] == 2
+    assert result["sessions_with_findings"] == []
+
+
+def test_19_harness_worktree_strips_to_parent_repo(config_root, home):
+    """Plan test 19: harness worktree path — strips to parent repo root; no
+    finding.
+
+    The second measured false-positive class: Claude Code worktrees carry
+    their own `.git`, so untreated every worktree session becomes a false
+    cross-project source (c14).
+    """
+    repo = git_repo(home, "repo")
+    worktree = repo / ".claude" / "worktrees" / "abc"
+    worktree.mkdir(parents=True)
+    (worktree / ".git").write_text("gitdir: real-worktree\n")
+
+    resolver = RootResolver(str(home))
+    assert resolver.resolve(str(worktree / "deep")) == (str(repo), "worktree")
+
+    result = scan_records(config_root, [
+        activity("s", cwd=str(worktree), tools=[write_block(repo / "f.txt")]),
+    ])
+    assert result["findings"] == []
+    assert result["same_project_writes"] == 1
+
+
+def test_20_normal_git_resolution(home):
+    """Plan test 20: normal git resolution (`.git` directory) — correct root."""
+    repo = git_repo(home, "repo")
+    (repo / "src" / "deep").mkdir(parents=True)
+    resolver = RootResolver(str(home))
+    assert resolver.resolve(str(repo / "src" / "deep")) == (str(repo), "git")
+    assert resolver.resolve(str(repo)) == (str(repo), "git")
+
+
+def test_21_git_file_resolves_to_that_directory(home):
+    """Plan test 21: `.git` file (user worktree) — resolves to that
+    directory, without reading `.git` contents."""
+    worktree = git_repo(home, "user-worktree", as_file=True)
+    resolver = RootResolver(str(home))
+    assert resolver.resolve(str(worktree)) == (str(worktree), "git")
+
+
+def test_22_non_git_directory_is_unknown(home):
+    """Plan test 22: non-git directory — UNKNOWN root; no fabricated root."""
+    plain = home / "plain" / "nested"
+    plain.mkdir(parents=True)
+    resolver = RootResolver(str(home))
+    assert resolver.resolve(str(plain)) == ("", "unknown")
+
+
+def test_23_deleted_directory_falls_back_or_unknown(home):
+    """Plan test 23: deleted/missing directory — step 2 fails → cwd-prefix
+    fallback or UNKNOWN, never a fabricated root."""
+    gone = home / "gone" / "sub"
+    resolver = RootResolver(str(home))
+    assert resolver.resolve(str(gone)) == ("", "unknown")
+    assert resolver.resolve(str(gone), {str(home / "gone")}) == (
+        str(home / "gone"), "cwd-prefix")
+
+
+def test_24_cwd_prefix_fallback_takes_the_shortest(home):
+    """Plan test 24: cwd-prefix fallback — shortest observed session cwd
+    that is a component-boundary prefix."""
+    resolver = RootResolver(str(home))
+    assert resolver.resolve(
+        "/a/proj/sub/deep", {"/a/proj/sub", "/a/proj"}) == (
+        "/a/proj", "cwd-prefix")
+
+
+def test_24b_sibling_directory_prefix_never_claimed(home):
+    """Plan test 24b: sibling-directory prefix — `/a/proj` never claims
+    `/a/proj-extras/file` (§5.4 step 3, component boundary)."""
+    resolver = RootResolver(str(home))
+    assert resolver.resolve("/a/proj-extras/file", {"/a/proj"}) == (
+        "", "unknown")
+    # Equal-at-boundary still matches, per the same rule.
+    assert resolver.resolve("/a/proj", {"/a/proj"}) == ("/a/proj", "cwd-prefix")
+
+
+def test_25_home_is_never_checked_or_returned(home):
+    """Plan test 25: `$HOME` itself, incl. a dotfiles repo at `~/.git` —
+    step 2 never checks or returns `$HOME`; home paths do not collapse into
+    one project."""
+    (home / ".git").mkdir()                     # a dotfiles repository
+    downloads = home / "Downloads"
+    downloads.mkdir()
+
+    resolver = RootResolver(str(home))
+    assert resolver.resolve(str(downloads)) == ("", "unknown")
+    assert resolver.resolve(str(home)) == ("", "unknown")
+    assert str(home) not in resolver.probed
+
+
+def test_26_walk_never_goes_above_filesystem_root(home):
+    """Plan test 26: never walks above `/` — bounded walk, plus the
+    defensive depth cap."""
+    resolver = RootResolver(str(home))
+    assert resolver.resolve("/a/b/c") == ("", "unknown")
+    assert "/" not in resolver.probed
+
+    deep = "/" + "/".join("d%d" % i for i in range(200))
+    assert resolver.resolve(deep) == ("", "unknown")
+    assert len(resolver.probed) < 200            # the cap held
+
+
+def test_27_symlinked_root_stays_lexical(home):
+    """Plan test 27: symlinked root — documented lexical behavior; no
+    `realpath` of historical paths. Ambiguity remains accepted."""
+    real = git_repo(home, "real-repo")
+    link = home / "link-repo"
+    link.symlink_to(real)
+
+    resolver = RootResolver(str(home))
+    root, evidence = resolver.resolve(str(link))
+    assert (root, evidence) == (str(link), "git")
+    assert root != str(real)
+
+
+def test_28_memoization_one_walk_per_directory(home):
+    """Plan test 28: memoization — one `stat` walk per distinct directory."""
+    repo = git_repo(home, "repo")
+    deep = repo / "a" / "b"
+    deep.mkdir(parents=True)
+
+    resolver = RootResolver(str(home))
+    assert resolver.resolve(str(deep)) == (str(repo), "git")
+    first = len(resolver.probed)
+    assert first == 3                            # b, a, repo
+
+    resolver.resolve(str(deep))
+    assert len(resolver.probed) == first         # fully memoized
+
+    resolver.resolve(str(repo / "a" / "c"))
+    assert len(resolver.probed) == first + 1     # only the new directory
+
+
+def test_29_another_repository_write_is_cross_project(config_root, home):
+    """Plan test 29: another-repository write — `cross_project` finding."""
+    source = git_repo(home, "repo-a")
+    dest = git_repo(home, "repo-b")
+    result = scan_records(config_root, [
+        activity("s", cwd=str(source), tools=[write_block(dest / "f.txt")]),
+    ])
+    (finding,) = result["findings"]
+    assert finding.finding_class == "cross_project"
+    assert finding.source_root == str(source)
+    assert finding.dest_root == str(dest)
+    assert finding.source_root_evidence == "git"
+    assert finding.op_count == 1
+    assert result["sessions_with_findings"] == ["s"]
+
+
+def test_30_downloads_write_is_non_project(config_root, home):
+    """Plan test 30: `~/Downloads` write — `non_project`, reported
+    separately, never folded into the cross-project headline."""
+    source = git_repo(home, "repo-a")
+    downloads = home / "Downloads"
+    downloads.mkdir()
+    result = scan_records(config_root, [
+        activity("s", cwd=str(source), tools=[write_block(downloads / "f.txt")]),
+    ])
+    (finding,) = result["findings"]
+    assert finding.finding_class == "non_project"
+    assert finding.source_root == str(source)
+    assert finding.dest_root == ""
+
+
+def test_31_claude_settings_json_is_config_finding(config_root, home):
+    """Plan test 31: `~/.claude/settings.json` write — `claude_config`."""
+    source = git_repo(home, "repo-a")
+    result = scan_records(config_root, [
+        activity("s", cwd=str(source),
+                 tools=[write_block(config_root / "settings.json")]),
+    ])
+    (finding,) = result["findings"]
+    assert finding.finding_class == "claude_config"
+    assert finding.dest_root == ""
+    assert result["suppressed"] == {}
+
+
+def test_32_claude_json_is_config_finding(config_root, home):
+    """Plan test 32: `~/.claude.json` write — `claude_config` finding."""
+    source = git_repo(home, "repo-a")
+    result = scan_records(config_root, [
+        activity("s", cwd=str(source), tools=[write_block(home / ".claude.json")]),
+    ])
+    (finding,) = result["findings"]
+    assert finding.finding_class == "claude_config"
+
+
+def test_33_control_surfaces_are_reportable(config_root, home):
+    """Plan test 33: `~/.claude/{hooks,skills,commands,agents}/**` writes —
+    `claude_config` findings, reportable, not suppressed."""
+    source = git_repo(home, "repo-a")
+    targets = [config_root / d / "x.md"
+               for d in ("hooks", "skills", "commands", "agents")]
+    result = scan_records(config_root, [
+        activity("s", cwd=str(source), tools=[write_block(t) for t in targets]),
+    ])
+    assert classes(result) == ["claude_config"] * 4
+    assert result["suppressed"] == {}
+
+
+def test_33b_unknown_claude_path_falls_through(config_root, home):
+    """Plan test 33b: unknown non-suppressed `~/.claude/` path — NOT
+    `claude_config`; falls through to ordinary classification, never rank-1.
+
+    Classifying by positive list rather than "everything not suppressed" is
+    what stops a new Claude Code auto-directory from reintroducing
+    infrastructure noise as the strongest finding class.
+    """
+    source = git_repo(home, "repo-a")
+    target = config_root / "todos" / "x.json"
+    assert not is_claude_config(str(target), str(config_root), str(home))
+
+    result = scan_records(config_root, [
+        activity("s", cwd=str(source), tools=[write_block(target)]),
+    ])
+    (finding,) = result["findings"]
+    assert finding.finding_class == "non_project"
+
+
+@pytest.mark.parametrize("rule,relative", [
+    ("S1", "projects/proj-x/memory/notes.md"),
+    ("S2", "projects/proj-x/session/tool-results/r.json"),
+    ("S3", "projects/proj-x/session.jsonl"),
+    ("S4", "plans/scratch.md"),
+])
+def test_34_to_37_config_root_suppression_rules(config_root, home, rule, relative):
+    """Plan tests 34–37: suppression rules S1–S4 individually — suppressed,
+    counted under their own name, absent from findings and secondary
+    counts."""
+    source = git_repo(home, "repo-a")
+    result = scan_records(config_root, [
+        activity("s", cwd=str(source), tools=[write_block(config_root / relative)]),
+    ])
+    assert result["suppressed"] == {rule: 1}
+    assert result["findings"] == []
+    assert result["outside_cwd_secondary"] == 0
+    assert result["unknown_root_writes"] == 0
+    assert result["same_project_writes"] == 0
+
+
+def test_38_harness_scratchpad_suppression(config_root, home):
+    """Plan test 38: suppression rule S5 — `/tmp/claude-*/**` and
+    `/private/tmp/claude-*/**`."""
+    source = git_repo(home, "repo-a")
+    result = scan_records(config_root, [
+        activity("s", cwd=str(source), tools=[
+            write_block("/tmp/claude-501/x/scratch.txt"),
+            write_block("/private/tmp/claude-501/y/scratch.txt"),
+        ]),
+    ])
+    assert result["suppressed"] == {"S5": 2}
+    assert result["findings"] == []
+    assert result["outside_cwd_secondary"] == 0
+
+
+def test_39_other_projects_claude_config_is_cross_project(config_root, home):
+    """Plan test 39: another project's `.claude/settings.local.json` —
+    `cross_project` by root logic, not the config anchor."""
+    source = git_repo(home, "repo-a")
+    dest = git_repo(home, "repo-b")
+    target = dest / ".claude" / "settings.local.json"
+    target.parent.mkdir(parents=True)
+    result = scan_records(config_root, [
+        activity("s", cwd=str(source), tools=[write_block(target)]),
+    ])
+    (finding,) = result["findings"]
+    assert finding.finding_class == "cross_project"
+    assert finding.dest_root == str(dest)
+
+
+def test_40_source_root_unknown_suppresses_the_claim(config_root, home):
+    """Plan test 40: source root UNKNOWN — cross-project claim suppressed,
+    `unknown_root_writes` counted.
+
+    The UNKNOWN-side rule is asymmetric by design: without knowing where
+    the session worked, "another project" cannot be asserted. The
+    destination-side-only case stays a `non_project` finding (test 30).
+    """
+    dest = git_repo(home, "repo-b")
+    record = activity("s", tools=[write_block(dest / "f.txt")])
+    del record["cwd"]                    # an absolute target stays classifiable
+    result = scan_records(config_root, [record])
+
+    assert result["findings"] == []
+    assert result["unknown_root_writes"] == 1
+    assert result["unknown_targets"] == 0
+
+
+def test_41_reads_are_never_findings(config_root, home):
+    """Plan test 41: reads outside the project — never findings.
+
+    §5.2 as corrected by critic finding 8: reads never enter the secondary
+    count either; they contribute only to `file_ops`.
+    """
+    source = git_repo(home, "repo-a")
+    other = git_repo(home, "repo-b")
+    result = scan_records(config_root, [
+        activity("s", cwd=str(source), tools=[read_block(other / "f.txt")]),
+    ])
+    assert result["findings"] == []
+    assert result["file_ops"] == 1
+    assert result["outside_cwd_secondary"] == 0
+
+
+def test_42_repeated_writes_aggregate_into_one_finding(config_root, home):
+    """Plan test 42: repeated writes to one target in one session — one
+    finding, `op_count` aggregated, never N display rows."""
+    source = git_repo(home, "repo-a")
+    dest = git_repo(home, "repo-b")
+    result = scan_records(config_root, [
+        activity("s", cwd=str(source), tools=[
+            write_block(dest / "f.txt"),
+            write_block(dest / "f.txt", tool="Edit"),
+            write_block(dest / "f.txt"),
+        ]),
+    ])
+    (finding,) = result["findings"]
+    assert finding.op_count == 3
+    assert finding.tool == "Write"       # last tool observed for the target
+
+
+def test_43_same_target_two_sessions_two_findings(config_root, home):
+    """Plan test 43: same target, two sessions — two findings (the
+    cardinality rule is session + class + target)."""
+    source = git_repo(home, "repo-a")
+    dest = git_repo(home, "repo-b")
+    result = scan_records(config_root, [
+        activity("s1", cwd=str(source), tools=[write_block(dest / "f.txt")]),
+        activity("s2", cwd=str(source), tools=[write_block(dest / "f.txt")]),
+    ])
+    assert len(result["findings"]) == 2
+    assert sorted(f.session_id for f in result["findings"]) == ["s1", "s2"]
+    assert result["sessions_with_findings"] == ["s1", "s2"]
+
+
+def test_suppression_and_config_lists_are_narrow(config_root, home):
+    """The named lists are narrow by design: a future auto-directory must
+    fail visibly (an unexplained finding), never silently (§5.3)."""
+    root, hm = str(config_root), str(home)
+    # Not suppressed: configuration is deliberately kept reportable.
+    assert suppression_rule(root + "/settings.json", root, hm) is None
+    assert suppression_rule(root + "/hooks/h.sh", root, hm) is None
+    # A new auto-directory is neither suppressed nor rank-1.
+    assert suppression_rule(root + "/todos/x.json", root, hm) is None
+    assert not is_claude_config(root + "/todos/x.json", root, hm)
+    # S5 needs the claude- prefix.
+    assert suppression_rule("/tmp/other/x", root, hm) is None
+    assert suppression_rule("/tmp/claude-1/x", root, hm) == "S5"

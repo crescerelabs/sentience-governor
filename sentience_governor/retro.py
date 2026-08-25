@@ -43,6 +43,17 @@ _ACTIVITY_TYPES = frozenset({"user", "assistant"})
 
 _SINCE_CHOICES = ("7d", "30d", "all")
 
+# Collection bound. Overflow increments ``targets_omitted``; the report says
+# so, because past this point collection itself is scan-order-bounded.
+MAX_TARGETS = 10_000
+
+# Defensive belt-and-braces on the parent walk. The walk is a finite lexical
+# parent chain and cannot cycle by construction, but the cap means that
+# property does not depend on the implementer avoiding ``resolve()``.
+_DEPTH_CAP = 64
+
+_WORKTREE_MARKER = "/.claude/worktrees/"
+
 
 class Finding(NamedTuple):
     """One session + one finding class + one normalized target (plan §3.1).
@@ -114,6 +125,163 @@ def interpret_target(file_path: object, cwd: object) -> tuple[Optional[str], str
     ):
         return None, "relative-no-cwd"
     return posixpath.normpath(posixpath.join(cwd, file_path)), "ok"
+
+
+def _is_within(path: str, base: str) -> bool:
+    """Component-boundary containment: ``path`` equals or sits under ``base``.
+
+    Pure string comparison — ``/a/proj`` never claims ``/a/proj-extras``.
+    """
+    return path == base or path.startswith(base.rstrip("/") + "/")
+
+
+def _relative_components(path: str, base: str) -> Optional[list[str]]:
+    """Components of ``path`` below ``base``, or ``None`` if not below it."""
+    base = base.rstrip("/")
+    if not path.startswith(base + "/"):
+        return None
+    return [c for c in path[len(base) + 1:].split("/") if c]
+
+
+def suppression_rule(target: str, root: str, home: str) -> Optional[str]:
+    """The named suppression rule matching ``target``, if any (plan §5.3).
+
+    Five narrow named rules rather than a blanket ``~/.claude/**``: the
+    measured noise came from auto-maintained classes only, and a future
+    Claude Code auto-directory must fail visibly (an unexplained finding)
+    rather than silently (swallowed by a wildcard). Applied *before* root
+    resolution, so suppressed paths cost no filesystem work and pollute no
+    count except their own rule's.
+    """
+    rel = _relative_components(target, root)
+    if rel:
+        # S1 — <root>/projects/*/memory/**  (auto-maintained memory)
+        if len(rel) >= 4 and rel[0] == "projects" and rel[2] == "memory":
+            return "S1"
+        # S2 — <root>/projects/*/*/tool-results/**  (tool-result cache)
+        if len(rel) >= 5 and rel[0] == "projects" and rel[3] == "tool-results":
+            return "S2"
+        # S3 — <root>/projects/**/*.jsonl  (the transcripts themselves)
+        if len(rel) >= 2 and rel[0] == "projects" and rel[-1].endswith(".jsonl"):
+            return "S3"
+        # S4 — <root>/plans/**  (agent-authored plan scratch)
+        if len(rel) >= 2 and rel[0] == "plans":
+            return "S4"
+    # S5 — /tmp/claude-*/** and /private/tmp/claude-*/**  (harness scratchpad)
+    for base in ("/tmp", "/private/tmp"):
+        rel = _relative_components(target, base)
+        if rel and len(rel) >= 2 and rel[0].startswith("claude-"):
+            return "S5"
+    return None
+
+
+def is_claude_config(target: str, root: str, home: str) -> bool:
+    """Whether ``target`` is a known Claude control surface (plan §5.2).
+
+    A narrow *positive* list, not "everything under ~/.claude that is not
+    suppressed": classifying by positive list is what stops a new Claude
+    Code auto-directory from reintroducing infrastructure noise as the
+    strongest finding class. Anything else under the config root falls
+    through to ordinary resolution and weaker context — never rank 1.
+
+    Anchored at the *current* home (and ``$CLAUDE_CONFIG_DIR`` where it
+    overrides discovery). Transcripts recorded under a different historical
+    home do not match and fall through; guessing historical homes would
+    manufacture evidence.
+    """
+    if target == posixpath.join(home, ".claude.json"):
+        return True
+    rel = _relative_components(target, root)
+    if not rel:
+        return False
+    if rel == ["settings.json"]:
+        return True
+    return len(rel) >= 2 and rel[0] in ("hooks", "skills", "commands", "agents")
+
+
+class RootResolver:
+    """Project-root resolution (plan §5.4) — layer 2, filesystem-informed.
+
+    Deliberately quarantined from ``hook_config._git_root``: different stop
+    rules (``$HOME``), memoization, and a worktree step. This layer is
+    best-effort retrospective evidence about project identity *today*, not
+    historical fact; when identity cannot be established the claim is
+    suppressed rather than manufactured (§5.5).
+    """
+
+    def __init__(self, home: str):
+        self._home = home.rstrip("/")
+        self._memo: dict[str, Optional[str]] = {}
+        self.probed: list[str] = []
+
+    def _git_root(self, directory: str) -> Optional[str]:
+        """Step 2: nearest ancestor containing ``.git``, memoized per directory.
+
+        Walks strictly below ``$HOME`` — ``$HOME`` itself is never checked
+        and never returned, so a dotfiles repository at ``~/.git`` cannot
+        collapse every home path into one project. For paths outside
+        ``$HOME`` the walk stops at ``/`` without checking it. The chain is
+        a finite lexical parent walk: no symlink is followed during
+        traversal, so it strictly shortens toward its stop boundary.
+        """
+        if directory in self._memo:
+            return self._memo[directory]
+
+        chain: list[str] = []
+        found: Optional[str] = None
+        current = directory
+        for _ in range(_DEPTH_CAP):
+            if current in self._memo:
+                found = self._memo[current]
+                break
+            if current in ("", "/") or current == self._home:
+                break
+            chain.append(current)
+            self.probed.append(current)
+            # `.git` as file or directory: a user worktree resolves to
+            # itself, the defensible answer without reading `.git`.
+            if os.path.exists(os.path.join(current, ".git")):
+                found = current
+                break
+            parent = posixpath.dirname(current)
+            if parent == current:
+                break
+            current = parent
+
+        for entry in chain:
+            self._memo[entry] = found
+        return found
+
+    def resolve(
+        self, directory: str, session_cwds: Optional[set] = None
+    ) -> tuple[str, str]:
+        """Resolve ``directory`` to ``(root, evidence)``; ``("", "unknown")``
+        when no root can be established."""
+        if not directory or not directory.startswith("/"):
+            return "", "unknown"
+
+        # Step 1 — harness worktree, lexical. Untreated, every worktree
+        # session becomes a false cross-project source (c14).
+        marker = directory.find(_WORKTREE_MARKER)
+        if marker != -1:
+            return directory[:marker], "worktree"
+
+        # Step 2 — filesystem `.git` evidence.
+        git_root = self._git_root(directory)
+        if git_root is not None:
+            return git_root, "git"
+
+        # Step 3 — transcript-only fallback: the shortest observed session
+        # cwd that is a prefix of the path at a component boundary.
+        if session_cwds:
+            candidates = [
+                cwd for cwd in session_cwds if _is_within(directory, cwd)
+            ]
+            if candidates:
+                return min(candidates, key=lambda c: (len(c), c)), "cwd-prefix"
+
+        # Step 4 — UNKNOWN. Never a fabricated root.
+        return "", "unknown"
 
 
 def _parse_since(since: str) -> Optional[timedelta]:
@@ -239,7 +407,19 @@ def scan(
     unknown_targets = 0
     unsupported_path_forms = 0
 
-    for path in discover(Path(root) if root is not None else config_root()):
+    discovery_root = Path(root) if root is not None else config_root()
+    root_str = str(discovery_root).rstrip("/")
+    home_str = str(Path.home()).rstrip("/")
+    session_cwds: dict[str, set] = {}
+    suppressed: dict[str, int] = {}
+    outside_cwd_secondary = 0
+    targets_omitted = 0
+    # Collected per (session, target, cwd): the finding class is not known
+    # until root resolution, which needs every cwd the session was observed
+    # at (§5.4 step 3) and therefore cannot run during streaming.
+    write_events: dict[tuple, list] = {}
+
+    for path in discover(discovery_root):
         try:
             with open(path, encoding="utf-8", errors="replace") as fh:
                 for line in _bounded_lines(fh, agg):
@@ -311,6 +491,12 @@ def scan(
                         session_id,
                         {"tool_calls": 0, "file_ops": 0, "shell_calls": 0},
                     )
+                    record_cwd = record.get("cwd")
+                    if isinstance(record_cwd, str) and record_cwd.startswith("/"):
+                        record_cwd = posixpath.normpath(record_cwd)
+                        session_cwds.setdefault(session_id, set()).add(record_cwd)
+                    else:
+                        record_cwd = None
                     for block in _tool_use_blocks(record):
                         name = block.get("name")
                         tool_calls += 1
@@ -337,6 +523,30 @@ def scan(
                                 unknown_targets += 1
                                 if reason == "windows":
                                     unsupported_path_forms += 1
+                            elif name in _WRITE_TOOLS:
+                                # Reads are never findings and never enter
+                                # the secondary count; they contribute only
+                                # to file_ops (§5.2, critic finding 8).
+                                rule = suppression_rule(
+                                    target, root_str, home_str
+                                )
+                                if rule is not None:
+                                    suppressed[rule] = suppressed.get(rule, 0) + 1
+                                elif (
+                                    record_cwd is None
+                                    or not _is_within(target, record_cwd)
+                                ):
+                                    outside_cwd_secondary += 1
+                                if rule is None:
+                                    key = (session_id, target, record_cwd or "")
+                                    event = write_events.get(key)
+                                    if event is not None:
+                                        event[0] += 1
+                                        event[1] = name
+                                    elif len(write_events) < MAX_TARGETS:
+                                        write_events[key] = [1, name]
+                                    else:
+                                        targets_omitted += 1
                         if name.startswith(_DECLARE_PREFIX):
                             declaration_sessions.add(session_id)
                     # ``record`` is dropped here: bulk payloads never
@@ -360,6 +570,70 @@ def scan(
         if sid in included_sessions
     }
 
+    # Classification (§5.2/§5.5). Deferred to here because step 3 of root
+    # resolution needs every cwd observed for the session.
+    resolver = RootResolver(home_str)
+    findings_by_key: dict[tuple, list] = {}
+    unknown_root_writes = 0
+    same_project_writes = 0
+
+    for (session_id, target, cwd), (op_count, tool) in write_events.items():
+        cwds = session_cwds.get(session_id)
+        source_root, source_evidence = (
+            resolver.resolve(cwd, cwds) if cwd else ("", "unknown")
+        )
+
+        if is_claude_config(target, root_str, home_str):
+            # Rank 1, and source-independent: the governance-relevant fact
+            # is that Claude targeted its own global configuration, which
+            # can affect future Claude sessions.
+            finding_class, dest_root = "claude_config", ""
+        elif not source_root:
+            # Without knowing where the session worked, "another project"
+            # cannot be asserted. The UNKNOWN-side rule is asymmetric by
+            # design (§5.5): a source-side UNKNOWN suppresses the claim.
+            unknown_root_writes += op_count
+            continue
+        else:
+            dest_root, _ = resolver.resolve(posixpath.dirname(target), cwds)
+            if not dest_root:
+                # Honestly covers both a genuine non-project directory and
+                # a repository since moved or deleted.
+                finding_class = "non_project"
+            elif dest_root == source_root:
+                same_project_writes += op_count
+                continue
+            else:
+                finding_class = "cross_project"
+
+        key = (session_id, finding_class, target)
+        existing = findings_by_key.get(key)
+        if existing is None:
+            findings_by_key[key] = [
+                op_count, tool, source_root, source_evidence, dest_root,
+            ]
+        else:
+            existing[0] += op_count
+            existing[1] = tool
+
+    findings = [
+        Finding(
+            session_id=session_id,
+            finding_class=finding_class,
+            target=target,
+            tool=tool,
+            op_count=op_count,
+            source_root=source_root,
+            source_root_evidence=source_evidence,
+            dest_root=dest_root,
+        )
+        # Deterministic collection order; the §8.4 display ranking is the
+        # renderer's concern and runs over the full collected aggregate.
+        for (session_id, finding_class, target), (
+            op_count, tool, source_root, source_evidence, dest_root
+        ) in sorted(findings_by_key.items())
+    ]
+
     agg.update({
         "sessions": len(included_sessions),
         "sessions_with_tools": sum(
@@ -375,15 +649,16 @@ def scan(
         "unknown_targets": unknown_targets,
         "unsupported_path_forms": unsupported_path_forms,
         "session_labels": session_labels,
-        # Classification layer (plan §5) — populated by the classifier.
-        "suppressed": {},
-        "unknown_root_writes": 0,
-        "outside_cwd_secondary": 0,
-        "same_project_writes": 0,
-        "sessions_with_findings": [],
-        "findings": [],
+        "suppressed": dict(sorted(suppressed.items())),
+        "unknown_root_writes": unknown_root_writes,
+        "outside_cwd_secondary": outside_cwd_secondary,
+        "same_project_writes": same_project_writes,
+        "sessions_with_findings": sorted({f.session_id for f in findings}),
+        "findings": findings,
+        # Display truncation is the renderer's concern (§8.4): ranking runs
+        # over the full collected aggregate, then display truncates.
         "findings_omitted": 0,
-        "targets_omitted": 0,
+        "targets_omitted": targets_omitted,
         "scan_seconds": time.monotonic() - t0,
         "since": since,
     })
