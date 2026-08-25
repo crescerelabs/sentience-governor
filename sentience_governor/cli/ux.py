@@ -835,6 +835,37 @@ def _load_session(path: Path) -> Tuple[str, List[dict]]:
     return (first, sessions[first])
 
 
+def _is_transient_bootstrap(events: List[dict]) -> bool:
+    """v0.3.0.4 — the confirmed transient-bootstrap (ghost) signature.
+
+    True iff the session is EXACTLY the artifact a Claude Code app restart
+    leaves behind when ``SessionEnd`` is the first-and-only hook invocation
+    for a transient session that never did anything: two events —
+    ``AGENT_REGISTERED`` followed by ``INTENT_DECLARED`` with
+    ``intent_source == "none"`` and a null ``stated_objective`` — and
+    nothing else.
+
+    Deliberately narrow. A session carrying a real declared intent
+    (non-null objective / non-"none" source), or ANY further event, is not
+    transient. Empty, single-event, or malformed sessions are never
+    classified transient — they keep whatever behavior they have today.
+    """
+    if len(events) != 2:
+        return False
+    first_ev, second_ev = events
+    if not isinstance(first_ev, dict) or not isinstance(second_ev, dict):
+        return False
+    if first_ev.get("event_type") != "AGENT_REGISTERED":
+        return False
+    if second_ev.get("event_type") != "INTENT_DECLARED":
+        return False
+    payload = second_ev.get("payload") or {}
+    return (
+        payload.get("intent_source") == "none"
+        and payload.get("stated_objective") is None
+    )
+
+
 # ---------------------------------------------------------------------------
 # F18 (v0.2.8.1) — "latest session with token data" hint.
 #
@@ -965,9 +996,37 @@ def run_status(args: argparse.Namespace) -> int:
         print("    sentience status")
         return 1
 
-    # At least one session exists.
-    latest = files[0]
-    session_id, events = _load_session(latest)
+    # At least one session exists. v0.3.0.4: "Last session" is the newest
+    # session that is NOT a transient bootstrap (ghost) artifact. The scan
+    # is exhaustive — every candidate is loaded and classified, newest
+    # first, until the first non-transient session or the set is exhausted.
+    # No cap and no heuristic: any shortcut that could misclassify would
+    # let a ghost displace the operator's real latest session again.
+    selected = None
+    newest_transient = None
+    transient_ids: List[str] = []
+    for candidate in files:
+        cand_sid, cand_events = _load_session(candidate)
+        if _is_transient_bootstrap(cand_events):
+            if newest_transient is None:
+                newest_transient = (candidate, cand_sid, cand_events)
+            transient_ids.append(cand_sid)
+            continue
+        selected = (candidate, cand_sid, cand_events)
+        break
+
+    if selected is not None:
+        latest, session_id, events = selected
+        displayed_transient = False
+        # Every transient passed over on the way to the real session.
+        skipped_ids = transient_ids
+    else:
+        # All candidates are transient: display the newest transient; the
+        # remaining N-1 are the skipped ones. The displayed session never
+        # appears in skipped_ids.
+        latest, session_id, events = newest_transient
+        displayed_transient = True
+        skipped_ids = transient_ids[1:]
 
     # FIX-3 (v0.2.8): split policy violations from advisory flags —
     # never an advisory count under a "Violations" label (§4.3).
@@ -989,7 +1048,17 @@ def run_status(args: argparse.Namespace) -> int:
                 "events": len(events),
                 **_status_reconciliation(events, cls),
             },
+            # v0.3.0.4 (additive): exactly the transient sessions that were
+            # passed over and are NOT displayed. The displayed last_session
+            # id never appears in ids.
+            "transient_sessions": {
+                "skipped": len(skipped_ids),
+                "ids": skipped_ids,
+            },
         }
+        if displayed_transient:
+            # Only in the all-transient edge case; absence means false.
+            payload["last_session"]["transient"] = True
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
 
@@ -1008,12 +1077,21 @@ def run_status(args: argparse.Namespace) -> int:
     print(f"Hook:           sessions detected")
     print(f"Trace path:     {trace_dir}")
     print()
-    print("Last session:")
+    if displayed_transient:
+        print("Last session (transient — no recorded activity):")
+    else:
+        print("Last session:")
     print(f"  ID:                 {session_id}")
     print(f"  Time:               {ts_str}")
     print(f"  Events:             {len(events)}")
     print(f"  Policy violations:  {pol_total}")
     print(f"  Advisory flags:     {adv_total}")
+    if skipped_ids:
+        print()
+        print(
+            f"Note: skipped {len(skipped_ids)} transient session(s) "
+            "with no recorded activity."
+        )
     if sample_line:
         print()
         print("Sample event:")
@@ -1039,6 +1117,17 @@ def run_list(args: argparse.Namespace) -> int:
     shown = files[:20]
     for i, f in enumerate(shown, start=1):
         session_id, events = _load_session(f)
+        # v0.3.0.4: residual transient-bootstrap (ghost) sessions stay
+        # visible — append-only transparency — but are labeled as what the
+        # evidence proves instead of carrying a vacuous ✓/⚠ verdict cell.
+        if _is_transient_bootstrap(events):
+            rel = _relative_time(f.stat().st_mtime)
+            sid_short = session_id[:12] if session_id else f.stem[:12]
+            print(
+                f"{i:>2}. {sid_short:<16} {rel:<8} "
+                f"{len(events):>3} events   transient — no activity"
+            )
+            continue
         cls = classify_session(events)
         # FIX-3 (v0.2.8): split glyph — violations and advisories are
         # different categories and must read as such (e.g. "⚠ 26v/52a").
@@ -1610,7 +1699,7 @@ def run_pulse(args: argparse.Namespace) -> int:
                 fb_result["sync_prompt"] = result["sync_prompt"]
                 print(
                     "The latest session has no per-turn token data yet "
-                    "(it may still be running).\n"
+                    "(it may still be running, or was a transient session).\n"
                     f"Showing the most recent session that does — {fb_sid} "
                     f"({fb_turns:,} turns).\n"
                     "Run `sentience pulse <id>` for a specific session.\n"
