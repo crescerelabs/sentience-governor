@@ -508,11 +508,11 @@ pipx install sentience-governor
 sentience init claude-code          # wire hooks and install /sentience-* skills
 ```
 
-`sentience init claude-code [path]` (v0.2.5.5+) writes — or idempotently merges into — `.claude/settings.json`, resolving the correct absolute path to the hook binary for your install (pipx/pip/source). It never clobbers existing hooks or settings, and re-running is a no-op. Pass a path to target a project other than the current directory.
+`sentience init claude-code [path]` writes the machine-local `.claude/settings.local.json` (from 0.3.0.3 — requires Claude Code v2.1.211+; earlier releases wrote the shared `settings.json`, which is now treated as read-only legacy evidence and never written). It resolves and verifies the correct absolute path to the hook binary for your install (pipx/pip/source), never touches hooks that aren't Sentience's, and converges on re-run: a stale binding from a removed install is updated, a partial historical install completed, duplicates collapsed, and an already-current configuration is a no-op. Any later `sentience` command in the project performs the same convergence, so an upgrade or reinstall repairs itself on the next command. Pass a path to target a project other than the current directory.
 
 **It also installs six slash commands (v0.2.8+).** Alongside the hook wiring, `sentience init claude-code` installs `/sentience-help`, `/sentience-pulse`, `/sentience-status`, `/sentience-profile`, `/sentience-violations`, and `/sentience-intent` into `~/.claude/skills/` — so you can read governance signals from the Claude Code chat without switching to a terminal. After install, restart Claude Code and type `/sentience-help`. Each command is a thin wrapper around the corresponding read-only CLI: the CLI produces the deterministic numbers at preprocessing time, and Claude renders them inline and is instructed to show them verbatim. Anything Claude adds beyond the rendered report is interpretation, not Sentience measurement. Note that the boundaries below bind the *commands*, not the agent — Claude retains its normal tool access in the session.
 
-By default, hooks are wired into the initialized project's `.claude/settings.json`, while skills install to your personal `~/.claude/skills/` so the commands are available across Claude Code. Pass `--project` to install the skills into that project's `.claude/skills/` instead.
+By default, hooks are wired into the initialized project's machine-local `.claude/settings.local.json`, while skills install to your personal `~/.claude/skills/` so the commands are available across Claude Code. Pass `--project` to install the skills into that project's `.claude/skills/` instead.
 
 | Command | What it shows |
 |---|---|
@@ -534,7 +534,7 @@ Use `--no-skills` to wire hooks without installing the commands, or `--force` to
 <details>
 <summary>Wiring it by hand instead</summary>
 
-Create or edit `.claude/settings.json` in your project (or `~/.claude/settings.json` for user-global). If `sentience-claude-code-hook` isn't on Claude Code's `$PATH`, use its absolute path:
+Create or edit the machine-local `.claude/settings.local.json` in your project (Claude Code v2.1.211+ resolves it at the repository root; don't commit it). Use the **absolute path** to `sentience-claude-code-hook` — an entry that deviates from the exact generated shape is treated as operator-customised and left alone by automatic convergence:
 
 ```json
 {
@@ -543,7 +543,7 @@ Create or edit `.claude/settings.json` in your project (or `~/.claude/settings.j
       {
         "matcher": "",
         "hooks": [
-          {"type": "command", "command": "sentience-claude-code-hook"}
+          {"type": "command", "command": "/absolute/path/to/sentience-claude-code-hook"}
         ]
       }
     ],
@@ -551,7 +551,7 @@ Create or edit `.claude/settings.json` in your project (or `~/.claude/settings.j
       {
         "matcher": "",
         "hooks": [
-          {"type": "command", "command": "sentience-claude-code-hook"}
+          {"type": "command", "command": "/absolute/path/to/sentience-claude-code-hook"}
         ]
       }
     ],
@@ -559,7 +559,7 @@ Create or edit `.claude/settings.json` in your project (or `~/.claude/settings.j
       {
         "matcher": "",
         "hooks": [
-          {"type": "command", "command": "sentience-claude-code-hook"}
+          {"type": "command", "command": "/absolute/path/to/sentience-claude-code-hook"}
         ]
       }
     ]

@@ -211,7 +211,7 @@ The same profile, the same event schema, and the same advisory flag vocabulary a
 
 The hook runs on every Claude Code session start. It reads `~/.sentience/profile.yaml`, validates the schema, computes the fingerprint, and attaches the resolved `GovernanceProfile` object to the session context. Every subsequent `TOOL_CALL_ATTEMPTED` event the hook emits has profile-derived flags pre-attached by the EventBuilder before the sink writer sees it.
 
-Installation: `sentience init claude-code` writes the hook configuration to `.claude/settings.json`. The hook is opt-in per-project; uninstalling removes the configuration cleanly.
+Installation: `sentience init claude-code` writes the hook configuration to the machine-local `.claude/settings.local.json` (0.3.0.3+; requires Claude Code v2.1.211+). The hook is opt-in per-project. The configuration is a machine-specific absolute path and is kept current by convergence: any `sentience` command run in the project updates a stale binding after an upgrade or reinstall. Uninstalling the package does not remove the configuration — the entries remain (and fail open, capturing nothing) until removed from `settings.local.json` or repaired by a reinstall.
 
 ### MCP wrapper
 

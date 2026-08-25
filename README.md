@@ -160,8 +160,12 @@ sentience init claude-code ~/some/proj  # a specific project
 sentience init claude-code --mcp        # also register the MCP server
 ```
 
-Writes the hook to `<path>/.claude/settings.json` and installs the Sentience
-slash commands, including `/sentience-pulse`. `--project` installs the skills
+Writes the hook to the machine-local `<path>/.claude/settings.local.json`
+(from 0.3.0.3; requires Claude Code v2.1.211+) and installs the Sentience
+slash commands, including `/sentience-pulse`. Re-running — or running any
+`sentience` command in the project — keeps the configuration current for your
+install, so a reinstall or moved environment repairs itself on the next
+command. `--project` installs the skills
 into the project instead of your home directory, so they can be shared with a
 team through git. `--no-skills` wires hooks only.
 
