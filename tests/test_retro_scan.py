@@ -12,6 +12,8 @@ import hashlib
 import json
 import os
 import shutil
+import socket
+import sys
 import tracemalloc
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1342,3 +1344,217 @@ def test_screen_skeleton_order_is_fixed(config_root, home):
             < rendered.index("Not evaluated")
             < rendered.index("This review is an example")
             < rendered.index("sentience init claude-code"))
+
+
+# ---------------------------------------------------------------------------
+# CP4 — CLI wiring, the two shared-system bypasses (§10.2), and the skill
+# ---------------------------------------------------------------------------
+
+DEAD_HOOK = "/nonexistent/bin/sentience-claude-code-hook"
+
+
+def managed_hook_doc() -> dict:
+    """A settings document carrying MANAGED Sentience evidence."""
+    from sentience_governor.cli import hook_config as hc
+    entry = {"matcher": "", "hooks": [{"type": "command", "command": DEAD_HOOK}]}
+    return {"hooks": {event: [dict(entry)] for event in hc.GOVERNED_EVENTS}}
+
+
+@pytest.fixture
+def evidence_project(tmp_path, monkeypatch):
+    """A project outside any git repo that carries Sentience evidence, with a
+    live hook binary available — so the seam has real repair work to do."""
+    from sentience_governor.cli import ux
+    project = tmp_path / "proj"
+    (project / ".claude").mkdir(parents=True)
+    local = project / ".claude" / "settings.local.json"
+    local.write_text(json.dumps(managed_hook_doc(), indent=2) + "\n")
+
+    live = tmp_path / "install" / "bin" / "sentience-claude-code-hook"
+    live.parent.mkdir(parents=True)
+    live.write_text("#!/bin/sh\nexit 0\n")
+    live.chmod(0o755)
+    monkeypatch.setattr(ux, "_resolve_hook_binary", lambda: str(live))
+    monkeypatch.chdir(project)
+    return local
+
+
+def file_state(path: Path):
+    return path.stat().st_mtime_ns, hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def run_cli(monkeypatch, *argv):
+    from sentience_governor.cli import ux
+    monkeypatch.setattr(sys, "argv", ["sentience", *argv])
+    return ux.main()
+
+
+def test_59_scan_on_a_fresh_install(config_root, home, monkeypatch, capsys):
+    """Plan test 59: `scan` on a fresh install — no email prompt, no
+    outbound request, result renders (§10.2).
+
+    The first-run bypass is new machinery in this release: `main()`
+    previously called the flow unconditionally.
+    """
+    from sentience_governor.cli import ux
+
+    first_run_calls = []
+    monkeypatch.setattr(ux, "maybe_run_first_run_flow",
+                        lambda **kwargs: first_run_calls.append("called"))
+
+    def no_network(*args, **kwargs):
+        raise AssertionError("scan opened a socket")
+
+    monkeypatch.setattr(socket, "socket", no_network)
+    monkeypatch.setattr(socket, "create_connection", no_network)
+
+    transcript_dir(config_root)
+    assert run_cli(monkeypatch, "scan") == 0
+
+    out = capsys.readouterr().out
+    assert "Sentience · Retrospective Review" in out
+    assert "sentience init claude-code" in out
+    assert first_run_calls == []
+    # Nothing was created under the fresh HOME beyond what the test made.
+    assert not (Path(home) / ".sentience").exists()
+
+
+def test_59b_other_commands_keep_their_first_run_behaviour(monkeypatch):
+    """The bypass is narrow: every other dispatched command still runs the
+    first-run flow, and a bare `sentience` still does too."""
+    from sentience_governor.cli import ux
+
+    assert ux._bypasses_first_run(ux.run_scan) is True
+    assert ux._bypasses_first_run(ux.run_pulse) is False
+    assert ux._bypasses_first_run(ux.run_init_claude_code) is False
+    assert ux._bypasses_first_run(None) is False
+
+
+def test_60_scan_runs_no_seam_convergence(config_root, evidence_project,
+                                          monkeypatch, capsys):
+    """Plan test 60: `scan` in a project with Sentience evidence —
+    `.claude/settings.local.json` untouched; the seam did not run."""
+    from sentience_governor.cli import ux
+    monkeypatch.setattr(ux, "maybe_run_first_run_flow", lambda **kwargs: None)
+
+    before = file_state(evidence_project)
+    transcript_dir(config_root)
+    assert run_cli(monkeypatch, "scan") == 0
+    capsys.readouterr()
+
+    assert file_state(evidence_project) == before
+
+
+def test_60b_other_commands_still_converge(evidence_project, monkeypatch,
+                                           capsys):
+    """The seam still repairs for other commands — the bypass costs exactly
+    one opportunistic convergence, on `scan` only.
+
+    This is also what makes test 60 meaningful: the same project, the same
+    dead entry, and a command that is not `scan` does write.
+    """
+    from sentience_governor.cli import ux
+    from sentience_governor.cli.hook_config import run_seam_convergence
+
+    assert ux._bypasses_seam(ux.run_scan) is True
+    assert ux._bypasses_seam(ux.run_init_claude_code) is True
+    assert ux._bypasses_seam(ux.run_pulse) is False
+
+    before = file_state(evidence_project)
+    run_seam_convergence()
+    capsys.readouterr()
+    assert file_state(evidence_project) != before
+    assert DEAD_HOOK not in evidence_project.read_text()
+
+
+def test_61_mutation_guard_on_the_seam_bypass(config_root, evidence_project,
+                                              monkeypatch, capsys):
+    """Plan test 61: mutation guard — disable the seam bypass so the seam
+    runs for `run_scan`; test 60's property is then violated, and restoring
+    the predicate makes it hold again.
+
+    In-process, per the `tests/v0_3_0_3/test_mutations.py` pattern:
+    plant → fail → restore → pass. The mutation is scoped to a
+    monkeypatch context so restoring it does not also undo the fixture's
+    chdir and binary resolution.
+    """
+    from sentience_governor.cli import ux
+    monkeypatch.setattr(ux, "maybe_run_first_run_flow", lambda **kwargs: None)
+
+    before = file_state(evidence_project)
+
+    with monkeypatch.context() as mutation:
+        mutation.setattr(ux, "_bypasses_seam",
+                         lambda func: func is ux.run_init_claude_code)
+        transcript_dir(config_root)
+        assert run_cli(monkeypatch, "scan") == 0
+        capsys.readouterr()
+        # Test 60's property is violated under the mutation.
+        assert file_state(evidence_project) != before
+
+    # Restored: rewrite the evidence and prove the property holds again.
+    evidence_project.write_text(json.dumps(managed_hook_doc(), indent=2) + "\n")
+    restored = file_state(evidence_project)
+    assert run_cli(monkeypatch, "scan") == 0
+    capsys.readouterr()
+    assert file_state(evidence_project) == restored
+
+
+def test_cli_since_and_json_surface(config_root, home, monkeypatch, capsys):
+    """`--since` defaults to `all` and `--json` emits exactly the locked
+    public payload — no private renderer metadata on the CLI surface."""
+    from sentience_governor.cli import ux
+    monkeypatch.setattr(ux, "maybe_run_first_run_flow", lambda **kwargs: None)
+
+    source = git_repo(Path(home), "repo-a")
+    dest = git_repo(Path(home), "repo-b")
+    scan_records(config_root, [
+        activity("s", cwd=str(source), tools=[write_block(dest / "f.txt")]),
+    ])
+
+    assert run_cli(monkeypatch, "scan", "--json") == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert set(payload) == set(retro.PUBLIC_FIELDS)
+    assert "_home" not in payload
+    assert payload["since"] == "all"
+    assert payload["findings"][0]["finding_class"] == "cross_project"
+
+    assert run_cli(monkeypatch, "scan", "--since", "7d", "--json") == 0
+    assert json.loads(capsys.readouterr().out)["since"] == "7d"
+
+    with pytest.raises(SystemExit):
+        run_cli(monkeypatch, "scan", "--since", "fortnight")
+
+
+def test_sentience_review_skill_is_a_thin_wrapper():
+    """Plan §8.5: the skill is a thin `!`-wrapper over `sentience scan`
+    with a verbatim-render instruction — no second analysis engine, no
+    objective inference, no reinterpretation, no verdicts."""
+    from sentience_governor.cli.ux import _bundled_skills
+
+    bundled = _bundled_skills()
+    assert "sentience-review" in bundled
+    body = bundled["sentience-review"]
+
+    assert "disable-model-invocation: true" in body
+    assert "allowed-tools: Bash(sentience scan *)" in body
+    assert "!`sentience scan`" in body
+    assert "Render the command output above verbatim in a code block." in body
+    assert "Interpretation (not Sentience output):" in body
+    # The wrapper forbids inventing analysis rather than performing any.
+    assert "Do not" in body
+    assert "summarize, reinterpret, reformat" in body
+    assert "severity" in body and "risk or confidence language" in body
+    assert "compute substitute results" in body
+
+
+def test_sentience_review_skill_installs_with_the_others(tmp_path):
+    """The existing installer picks the new skill up with no mechanism
+    change: it reaches existing users on their next `init claude-code`."""
+    from sentience_governor.cli.ux import _install_skills
+
+    skills_root = tmp_path / ".claude" / "skills"
+    _install_skills(skills_root, force=False)
+    installed = skills_root / "sentience-review" / "SKILL.md"
+    assert installed.is_file()
+    assert "!`sentience scan`" in installed.read_text()

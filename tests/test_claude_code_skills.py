@@ -1,10 +1,10 @@
 """v0.2.7 CP1 — bundled Claude Code SKILL.md files + parser checks.
 
-LOAD-BEARING. Verifies the six bundled skills are well-formed and honor
+LOAD-BEARING. Verifies the seven bundled skills are well-formed and honor
 the locked plan decisions, BEFORE any installer code exists:
 
-  - D3  — all six set ``disable-model-invocation: true``.
-  - D2/§6 — the five shellout bash lines match the §6 mapping exactly.
+  - D3  — all seven set ``disable-model-invocation: true``.
+  - D2/§6 — the six shellout bash lines match the §6 mapping exactly.
   - D9  — no skill accepts a session-selection argument (latest-only).
   - D12 — no shellout invokes a mutating CLI command (read-only).
   - D4  — shellout ``allowed-tools`` are scoped to ``sentience``,
@@ -28,6 +28,8 @@ SHELLOUT_SKILLS = {
     "sentience-profile": "sentience profile view",
     "sentience-violations": "sentience analyze policy-violations --latest --no-prompt",
     "sentience-intent": "sentience analyze undeclared-intent --latest --no-prompt",
+    # v0.3.1 — the retrospective Reader's in-Claude surface.
+    "sentience-review": "sentience scan",
 }
 STATIC_SKILLS = {"sentience-help"}
 ALL_SKILLS = sorted(set(SHELLOUT_SKILLS) | STATIC_SKILLS)
@@ -148,8 +150,9 @@ def test_no_skill_references_raw_trace_paths(name):
     assert ".sentience/traces" not in text
 
 
-def test_exactly_six_skills_bundled():
-    """No stray skills ship beyond the six in the locked §6 set."""
+def test_exactly_seven_skills_bundled():
+    """No stray skills ship beyond the locked set (six from v0.2.7 §6 plus
+    v0.3.1's sentience-review)."""
     skills_dir = resources.files("sentience_governor").joinpath("data/skills")
     shipped = sorted(
         p.name for p in skills_dir.iterdir()
