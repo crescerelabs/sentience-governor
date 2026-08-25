@@ -5,6 +5,68 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.0.3] — 2026-08-24
+
+**Patch release.** Uninstalling or relocating the package used to leave a
+Claude Code project wired to a hook path that no longer existed. The hook is
+fail-open by design, so nothing broke — and nothing was captured, indefinitely,
+while the project still looked configured. This release moves the hook binding
+to the machine-local settings layer and keeps it current automatically.
+
+**Requires Claude Code v2.1.211 or later.** Earlier Claude Code versions are
+out of scope for the Claude Code integration. The floor is a support statement,
+not a runtime check: Sentience performs no version detection and cannot
+determine which Claude Code version will read the configuration it writes — on
+older versions the integration may silently capture nothing.
+
+### Changed
+- **The Claude Code hook binding now lives in the machine-local
+  `.claude/settings.local.json`**, not the team-shared `.claude/settings.json`.
+  The binding is a machine-specific absolute path to this install's hook
+  binary; committing it caused churn between teammates whose paths differ.
+  Claude Code resolves the local file at the repository root (v2.1.211+) and
+  keeps it out of git when it creates it; when Sentience creates the file
+  first, it prints one line telling you not to commit it.
+- **`sentience init claude-code` is now a convergence, not a merge.** The
+  machine-local file is brought to exactly one Sentience hook entry per event
+  (`PreToolUse`, `PostToolUse`, `SessionEnd`) for the running install: a stale
+  binding from a removed install is updated, a pre-v0.2.6.1 partial install is
+  completed, duplicates collapse to one, and an already-current configuration
+  is a no-op that still refreshes skills. The resolved hook binary is verified
+  (exists, executable) before anything is written.
+- **The team-shared `.claude/settings.json` is now read-only migration
+  evidence.** Sentience never writes it — neither `init` nor any other
+  command. Legacy Sentience entries there are left for the team to remove in a
+  coordinated way; `init` reports when a live one conflicts and exits without
+  writing rather than risking two live hooks per tool call.
+
+### Added
+- **Automatic upgrade/reinstall recovery.** Any `sentience` CLI command run
+  inside an already-configured project first brings that project's
+  Sentience-managed hook configuration up to date for the running install.
+  This never configures a project that has no Sentience configuration, never
+  blocks the command it rides on (one stderr warning at most, and only where
+  there is something to report), and repairs the motivating case: reinstall
+  the package, run any `sentience` command in the project, and capture
+  resumes.
+- **Conservative ownership rules.** Only an entry whose entire structure
+  exactly matches what Sentience generates is treated as Sentience-managed. A
+  Sentience-looking entry that was hand-modified (wrapped, given arguments,
+  extended) is never rewritten: it is reported and, because an entry that
+  cannot be parsed cannot be proven dead, it blocks automatic changes that
+  could produce a second live hook. Foreign hooks are never touched.
+- **Write safety.** Settings writes go through a temp file with fsync and an
+  atomic replace (torn-write protection), and re-read the target immediately
+  before replacing it — if anything else wrote the file in between, the write
+  is abandoned and the other writer's content is preserved.
+
+### Fixed
+- **Silent capture loss after uninstall/reinstall.** The motivating incident:
+  a project whose hook pointed into a deleted `pipx` environment captured
+  nothing for weeks while appearing configured. With the binding machine-local
+  and convergence on use, the first `sentience` command after a reinstall
+  restores capture.
+
 ## [0.3.0.2] — 2026-08-20
 
 **Patch release.** Under LangGraph, one agent run was split across several

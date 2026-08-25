@@ -6,6 +6,43 @@ Breaking changes bump the minor version until 1.0. After 1.0, breaking changes b
 
 ---
 
+## 0.3.0.3 — 2026-08-24
+
+**Your hook configuration now keeps itself current.** Before this release,
+uninstalling or moving the package left projects wired to a hook path that no
+longer existed. The hook fails open by design — it must never break your agent
+— so nothing visibly broke: capture just stopped, silently, while the project
+still looked configured.
+
+Two changes close that. First, the hook binding moves to the machine-local
+`.claude/settings.local.json`. It is an absolute path to *your* install's
+binary, so it never belonged in the team-shared, committed `settings.json` —
+and Sentience no longer writes that shared file at all. Legacy entries there
+are treated as read-only evidence; if a live one conflicts, Sentience tells you
+and asks you to coordinate its removal with your team instead of guessing.
+
+Second, every `sentience` command you run inside an already-configured project
+first brings that project's hook configuration up to date for the running
+install. Reinstall the package, run any `sentience` command in the project, and
+capture resumes — no separate repair step, nothing to remember. This never
+configures a project that has no Sentience configuration, and it never blocks
+the command you actually ran: if the configuration can't be updated safely you
+get one warning line, not a failure.
+
+Hand-customised hook entries are respected: anything Sentience-looking that
+doesn't exactly match what Sentience generates is reported, never rewritten.
+Foreign hooks are never touched. The governance output itself — events,
+violations, evaluation — is unchanged, and the hook runtime is byte-identical
+to 0.3.0.2.
+
+**Requires Claude Code v2.1.211 or later.** Sentience performs no version
+detection and cannot determine which Claude Code version will read the
+configuration it writes; on older versions the integration may silently
+capture nothing. Earlier versions are out of scope. See
+[`sentience init claude-code`](./commands.md#sentience-init-claude-code-path).
+
+---
+
 ## 0.3.0.2 — 2026-08-20
 
 **One governance session per run, under LangGraph.** LangGraph fires chain-level callbacks once for the graph and once for each node. The LangChain callback handler treated each of those as a new session, so a single run was split across several — and only the first carried an intent baseline. The rest evaluated every tool call against nothing, and reported POL-001 on tools you had declared. A nested end also tore the active session down while the outer graph was still running.
