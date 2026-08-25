@@ -14,13 +14,19 @@ import pytest
 
 from sentience_governor.cli import ux
 
-FAKE_HOOK = "/fake/bin/sentience-claude-code-hook"
 FAKE_MCP = "/fake/bin/sentience-mcp-server"
 
 
 @pytest.fixture
-def patched_binaries(monkeypatch):
-    monkeypatch.setattr(ux, "_resolve_hook_binary", lambda: FAKE_HOOK)
+def patched_binaries(monkeypatch, tmp_path):
+    # v0.3.0.3: init verifies the resolved hook binary before writing (A11),
+    # so the faked hook must be a real executable file. The MCP binary is
+    # not verified by init and may stay a bare fake path.
+    fake_hook = tmp_path / "fakebin" / "sentience-claude-code-hook"
+    fake_hook.parent.mkdir(parents=True, exist_ok=True)
+    fake_hook.write_text("#!/bin/sh\nexit 0\n")
+    fake_hook.chmod(0o755)
+    monkeypatch.setattr(ux, "_resolve_hook_binary", lambda: str(fake_hook))
     monkeypatch.setattr(ux, "_resolve_mcp_server_binary", lambda: FAKE_MCP)
 
 
@@ -46,7 +52,7 @@ class TestNoDefaultRegistration:
         rc = _run(tmp_path, mcp=False)
         assert rc == 0
         # Hook is wired...
-        assert (tmp_path / ".claude" / "settings.json").is_file()
+        assert (tmp_path / ".claude" / "settings.local.json").is_file()
         # ...but the MCP server is NOT registered by default.
         assert not _mcp_json(tmp_path).exists()
 
@@ -136,7 +142,11 @@ class TestFailOpen:
     def test_missing_binary_warns_and_skips_without_failing(
         self, tmp_path, monkeypatch, capsys
     ):
-        monkeypatch.setattr(ux, "_resolve_hook_binary", lambda: FAKE_HOOK)
+        fake_hook = tmp_path / "fakebin" / "sentience-claude-code-hook"
+        fake_hook.parent.mkdir(parents=True, exist_ok=True)
+        fake_hook.write_text("#!/bin/sh\nexit 0\n")
+        fake_hook.chmod(0o755)
+        monkeypatch.setattr(ux, "_resolve_hook_binary", lambda: str(fake_hook))
         monkeypatch.setattr(ux, "_resolve_mcp_server_binary", lambda: None)
         rc = _run(tmp_path, mcp=True)
         assert rc == 0  # hooks still wired; init does not fail
