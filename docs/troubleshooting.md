@@ -61,7 +61,7 @@ Cause:
 One of: wrong settings file, CLI not on PATH, Claude Code started before you saved the config, or no tool calls happened in the session.
 
 Fix:
-1. Confirm config location: `~/.claude/settings.json` (user-global) or `.claude/settings.json` (project-local, takes precedence).
+1. Confirm config location: the machine-local `.claude/settings.local.json` (0.3.0.3+ canonical home; Claude Code v2.1.211+ resolves it at the repository root). A `.claude/settings.json` entry from an older release still works while its path exists, but is treated as read-only legacy — running any `sentience` command in the project migrates a dead one to `settings.local.json` automatically.
 2. Confirm CLI resolves: `which sentience-claude-code-hook` from Claude Code's launch shell.
 3. Restart Claude Code — it reads settings at startup.
 4. Make actual tool calls — the hook only fires on tool invocations.

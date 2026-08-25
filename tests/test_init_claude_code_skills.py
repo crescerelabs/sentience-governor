@@ -136,7 +136,13 @@ def env(tmp_path, monkeypatch):
     proj = tmp_path / "proj"
     proj.mkdir()
     monkeypatch.setenv("HOME", str(home))
-    monkeypatch.setattr(ux, "_resolve_hook_binary", lambda: "/fake/hook")
+    # v0.3.0.3: init verifies the resolved binary before writing (A11), so
+    # the faked hook must be a real executable file.
+    fake_hook = tmp_path / "bin" / "sentience-claude-code-hook"
+    fake_hook.parent.mkdir(parents=True, exist_ok=True)
+    fake_hook.write_text("#!/bin/sh\nexit 0\n")
+    fake_hook.chmod(0o755)
+    monkeypatch.setattr(ux, "_resolve_hook_binary", lambda: str(fake_hook))
     monkeypatch.setattr(ux, "_probe_sentience_on_path", lambda: True)
     return home, proj
 
@@ -166,7 +172,7 @@ def test_no_skills_wires_hooks_only(env, capsys):
     rc = _run(proj, no_skills=True)
     assert rc == 0
     assert not (home / ".claude" / "skills").exists()
-    assert (proj / ".claude" / "settings.json").is_file()   # hooks still wired
+    assert (proj / ".claude" / "settings.local.json").is_file()   # hooks still wired
 
 
 def test_project_flag_lands_in_project_dir(env, capsys):
@@ -230,5 +236,5 @@ def test_skill_failure_is_fail_open_hooks_survive(env, monkeypatch, capsys):
     monkeypatch.setattr(ux, "_install_skills", _boom)
     rc = _run(proj)
     assert rc == 0                                           # R5 / acceptance #9
-    assert (proj / ".claude" / "settings.json").is_file()    # hooks intact
+    assert (proj / ".claude" / "settings.local.json").is_file()    # hooks intact
     assert "could not install skills" in capsys.readouterr().err

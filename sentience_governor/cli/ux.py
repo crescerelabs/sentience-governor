@@ -2368,8 +2368,17 @@ def run_init_claude_code(args: argparse.Namespace) -> int:
         print(f"error: {project_dir} is not a directory.", file=sys.stderr)
         return 1
 
-    command = _resolve_hook_binary()
-    if command is None:
+    # v0.3.0.3 — one convergence engine (cli.hook_config). init is
+    # converge(target, may_create_without_evidence=True): it creates the
+    # canonical machine-local configuration in .claude/settings.local.json,
+    # brings historical stale/partial/duplicate Sentience-managed
+    # configuration forward, and treats the team-shared settings.json as
+    # READ-ONLY migration evidence — it is never written.
+    from sentience_governor.cli import hook_config as _hc
+
+    res = _hc.converge(project_dir, caller="init")
+
+    if res.outcome == _hc.NO_BINARY:
         print(
             f"error: could not locate the {_HOOK_BINARY_NAME!r} binary.\n"
             "It ships with sentience-governor — confirm the install "
@@ -2378,80 +2387,55 @@ def run_init_claude_code(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 1
-
-    claude_dir = project_dir / ".claude"
-    settings_path = claude_dir / "settings.json"
-
-    # Load existing settings (tolerant of absent / empty / invalid file).
-    settings: dict = {}
-    if settings_path.is_file():
-        try:
-            raw = settings_path.read_text(encoding="utf-8").strip()
-            settings = json.loads(raw) if raw else {}
-            if not isinstance(settings, dict):
-                print(
-                    f"error: {settings_path} does not contain a JSON object; "
-                    "refusing to overwrite. Inspect it manually.",
-                    file=sys.stderr,
-                )
-                return 1
-        except (OSError, json.JSONDecodeError) as exc:
-            print(
-                f"error: could not read existing {settings_path}: {exc}. "
-                "Fix or remove it, then re-run.",
-                file=sys.stderr,
-            )
-            return 1
-
-    hooks = settings.setdefault("hooks", {})
-    if not isinstance(hooks, dict):
+    if res.outcome == _hc.BINARY_INVALID:
         print(
-            f"error: 'hooks' in {settings_path} is not an object; refusing "
-            "to overwrite. Inspect it manually.",
+            f"error: the resolved hook binary is not executable: "
+            f"{res.binary}",
+            file=sys.stderr,
+        )
+        return 1
+    if res.outcome in (_hc.UNREADABLE, _hc.MALFORMED):
+        print(
+            f"error: could not read existing settings ({res.reason}). "
+            "Fix or remove the file, then re-run.",
+            file=sys.stderr,
+        )
+        return 1
+    if res.outcome == _hc.AMBIGUOUS_LOCAL:
+        print(
+            f"error: {res.local_path} contains a modified Sentience-looking "
+            f"hook entry ({res.detail}). Sentience will not change it "
+            "automatically.\nReview that entry: remove it, or restore it to "
+            "the configuration Sentience generates. Then re-run.",
+            file=sys.stderr,
+        )
+        return 1
+    if res.outcome == _hc.SHARED_CONFLICT:
+        print(
+            f"Sentience: {res.shared_path} contains a live Sentience hook "
+            "that differs\nfrom this install (or one Sentience cannot "
+            "parse). Writing local configuration\ncould run two hooks per "
+            "tool call.\nThat file is shared with your team, so Sentience "
+            "will not change it.\nCoordinate its removal with your team, "
+            "then re-run.",
+            file=sys.stderr,
+        )
+        return 1
+    if res.outcome in (_hc.UNWRITABLE, _hc.WRITE_CONFLICT):
+        print(
+            f"error: failed to write {res.local_path}: {res.reason}",
             file=sys.stderr,
         )
         return 1
 
-    added = []
-    already = []
-    # PreToolUse / PostToolUse capture per-tool governance events; SessionEnd
-    # (v0.2.6.1) lets the hook parse the flushed transcript for per-turn token
-    # burn. An empty matcher means "all" and is valid for the SessionEnd
-    # lifecycle hook, so the same entry shape works for all three.
-    for event in ("PreToolUse", "PostToolUse", "SessionEnd"):
-        entries = hooks.setdefault(event, [])
-        if not isinstance(entries, list):
-            print(
-                f"error: hooks.{event} in {settings_path} is not a list; "
-                "refusing to overwrite. Inspect it manually.",
-                file=sys.stderr,
-            )
-            return 1
-        if _entry_has_command(entries, command):
-            already.append(event)
-        else:
-            entries.append(_hook_entry(command))
-            added.append(event)
-
-    # Wire hooks — write settings.json only when something was added. A
-    # re-run with hooks already present is NOT a no-op now: it still
-    # installs/refreshes skills below (D6/D8).
-    if added:
-        try:
-            claude_dir.mkdir(parents=True, exist_ok=True)
-            settings_path.write_text(
-                json.dumps(settings, indent=2) + "\n", encoding="utf-8"
-            )
-        except OSError as exc:
-            print(f"error: failed to write {settings_path}: {exc}", file=sys.stderr)
-            return 1
-        print(f"Hook installed in {settings_path}")
-        print(f"  command: {command}")
-        print(f"  events:  {', '.join(added)}" + (
-            f"  (already present: {', '.join(already)})" if already else ""
-        ))
+    if res.outcome == _hc.NOOP:
+        # Already canonical. NOT a total no-op: skills still refresh below.
+        print(f"Sentience hook already current for {project_dir}")
     else:
-        print(f"Hook already wired in {settings_path} ({', '.join(already)}).")
+        print(f"Sentience hook configured for {project_dir}")
+        print(f"  file:     {res.local_path}   (machine-local; not for commit)")
+        print(f"  command:  {res.binary}")
+        print(f"  events:   {', '.join(_hc.GOVERNED_EVENTS)}")
 
     # v0.2.7: install the slash-command skills by default (D6); --no-skills
     # opts out. Runs AFTER hooks are wired so a skills failure leaves the
@@ -3029,8 +3013,9 @@ def main() -> int:
     pi_claude = init_subparsers.add_parser(
         "claude-code",
         help=(
-            "Install the Claude Code hook into a project's "
-            ".claude/settings.json (idempotent merge)."
+            "Install the Claude Code hook into a project's machine-local "
+            ".claude/settings.local.json (idempotent convergence). "
+            "Requires Claude Code v2.1.211 or later."
         ),
     )
     pi_claude.add_argument(
@@ -3110,6 +3095,17 @@ def main() -> int:
     # AND the guide on a bare `sentience`).
     if getattr(args, "func", None) is None:
         return _print_command_guide()
+
+    # v0.3.0.3 — the on-use convergence seam. Runs for every dispatched
+    # subcommand EXCEPT `init claude-code`, which converges its own explicit
+    # target (identity comparison, not string matching). Ordering: first-run
+    # flow above (interactive), then convergence, then dispatch. Fail-open:
+    # run_seam_convergence never raises, and it never configures a project
+    # that carries no Sentience evidence.
+    if args.func is not run_init_claude_code:
+        from sentience_governor.cli.hook_config import run_seam_convergence
+
+        run_seam_convergence()
 
     return args.func(args)
 

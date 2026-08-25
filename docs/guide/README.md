@@ -65,7 +65,7 @@ The three CLI commands installed by `pip install`:
 
 - **`sentience`** — curated viewer for agent-hook session traces (Claude Code today): `sentience status`, `sentience list`, `sentience open [--latest | <id>] [--summary]`
 - **`sentience-cli`** — raw viewer for library traces (MCP wrapper, LangChain, golden-trace fixtures)
-- **`sentience-claude-code-hook`** — invoked by Claude Code via `.claude/settings.json`; not run by operators directly
+- **`sentience-claude-code-hook`** — invoked by Claude Code via the machine-local `.claude/settings.local.json` (0.3.0.3+; earlier releases wired the shared `settings.json`); not run by operators directly
 
 Run any of them with `--help` for built-in usage. Or read the deep-dive guides above. The root `README.md` has a compact commands table if you just need the skim.
 

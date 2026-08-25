@@ -16,7 +16,7 @@ sentience init claude-code             # wire the current project
 sentience init claude-code /path/to/project
 ```
 
-This writes (or idempotently merges into) `.claude/settings.json` with the correct hook-binary path for your install. It never clobbers existing hooks or settings; re-running refreshes the skills safely (a hand-edited skill is preserved unless you pass `--force`).
+This writes the machine-local `.claude/settings.local.json` with the correct, verified hook-binary path for your install (from 0.3.0.3 — **requires Claude Code v2.1.211 or later**; do not commit this file). It never touches hooks that aren't Sentience's, and it never writes the team-shared `.claude/settings.json`. Re-running converges rather than duplicates — and any later `sentience` command in the project brings the configuration current again after an upgrade or reinstall. Re-running also refreshes the skills safely (a hand-edited skill is preserved unless you pass `--force`).
 
 It also installs six Claude Code skills into `~/.claude/skills/`, exposed as `/sentience-*` slash commands (new in 0.2.8). After it finishes, **restart Claude Code** and type:
 
@@ -27,24 +27,24 @@ It also installs six Claude Code skills into `~/.claude/skills/`, exposed as `/s
 
 The commands are operator-invoked only, scoped to the latest captured session, and read-only. Pass `--no-skills` to wire hooks without them, `--project` for a project-local install you can share via git, or `--force` to overwrite a hand-edited skill.
 
-By default, hooks are wired into the initialized project's `.claude/settings.json`, while skills install to your personal `~/.claude/skills/`; `--project` makes the skills project-local too.
+By default, hooks are wired into the initialized project's machine-local `.claude/settings.local.json`, while skills install to your personal `~/.claude/skills/`; `--project` makes the skills project-local too.
 
 <details>
 <summary>Prefer to wire it by hand?</summary>
 
-Create or edit `.claude/settings.json` in your project (or `~/.claude/settings.json` user-global). Use the absolute path to `sentience-claude-code-hook` if it isn't on Claude Code's `$PATH`. **All three hooks are required** — omit `SessionEnd` and per-turn token burn is never captured, so `sentience pulse` reports `no_signal`:
+Create or edit the machine-local `.claude/settings.local.json` in your project (Claude Code v2.1.211+ resolves it at the repository root; don't commit it). Use the **absolute path** to `sentience-claude-code-hook` — a hand-written entry that deviates from this exact shape (extra arguments, wrappers, other keys) is treated as operator-customised and will not be managed automatically. **All three hooks are required** — omit `SessionEnd` and per-turn token burn is never captured, so `sentience pulse` reports `no_signal`:
 
 ```json
 {
   "hooks": {
     "PreToolUse": [
-      {"matcher": "", "hooks": [{"type": "command", "command": "sentience-claude-code-hook"}]}
+      {"matcher": "", "hooks": [{"type": "command", "command": "/absolute/path/to/sentience-claude-code-hook"}]}
     ],
     "PostToolUse": [
-      {"matcher": "", "hooks": [{"type": "command", "command": "sentience-claude-code-hook"}]}
+      {"matcher": "", "hooks": [{"type": "command", "command": "/absolute/path/to/sentience-claude-code-hook"}]}
     ],
     "SessionEnd": [
-      {"matcher": "", "hooks": [{"type": "command", "command": "sentience-claude-code-hook"}]}
+      {"matcher": "", "hooks": [{"type": "command", "command": "/absolute/path/to/sentience-claude-code-hook"}]}
     ]
   }
 }

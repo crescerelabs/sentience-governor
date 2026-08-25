@@ -96,7 +96,16 @@ The glyph splits the counts: `Nv` policy violations / `Ma` advisory flags (new i
 
 ### `sentience init claude-code [path]`
 
-Wires the Claude Code hook into a project's `.claude/settings.json` so every tool call in that project emits a governance event — and installs the six `/sentience-*` slash commands (new in 0.2.8).
+> **Requires Claude Code v2.1.211 or later** (from sentience-governor 0.3.0.3).
+> The hook binding is written to the machine-local `.claude/settings.local.json`,
+> which Claude Code resolves at the repository root from that version onward.
+> Sentience cannot reliably determine which Claude Code version will read this
+> configuration; on older versions the integration may silently capture nothing.
+
+Wires the Claude Code hook into a project's machine-local
+`.claude/settings.local.json` (from 0.3.0.3; earlier releases wrote the shared
+`.claude/settings.json`) so every tool call in that project emits a governance
+event — and installs the six `/sentience-*` slash commands (new in 0.2.8).
 
 ```bash
 sentience init claude-code             # wire the current directory + install skills
@@ -107,7 +116,9 @@ sentience init claude-code --force            # overwrite a hand-edited skill
 sentience init claude-code --mcp              # also register the MCP server (new in 0.3.0)
 ```
 
-Idempotent — it merges into an existing `.claude/settings.json` without clobbering other hooks or settings, and re-running refreshes skills safely: an unchanged skill is a no-op, a new release updates managed skills, and a skill you've hand-edited is preserved unless `--force` (tracked via a per-root `.sentience-skills.json` manifest). By default hooks are wired for the initialized project while skills install to your personal `~/.claude/skills/`. It resolves the correct hook-binary path for your install (pipx, pip-in-venv, or source), so you don't hand-edit JSON or guess a path — and it warns (never fails) if `sentience` isn't resolvable on your `$PATH`.
+Idempotent by convergence — the machine-local `.claude/settings.local.json` is brought to exactly one Sentience hook entry per event for the running install: a stale binding from a removed or moved install is updated, a partial historical install is completed, duplicates collapse to one, and an already-current configuration is a no-op. Hooks that aren't Sentience's are never touched, and the team-shared `.claude/settings.json` is never written: legacy Sentience entries there are treated as read-only migration evidence (coordinate their removal with your team). A hand-customised Sentience-looking entry is never rewritten automatically — init reports it and stops. Re-running refreshes skills safely: an unchanged skill is a no-op, a new release updates managed skills, and a skill you've hand-edited is preserved unless `--force` (tracked via a per-root `.sentience-skills.json` manifest). By default hooks are wired for the initialized project while skills install to your personal `~/.claude/skills/`. It resolves and verifies the correct hook-binary path for your install (pipx, pip-in-venv, or source), so you don't hand-edit JSON or guess a path — and it warns (never fails) if `sentience` isn't resolvable on your `$PATH`.
+
+From 0.3.0.3, any other `sentience` command run inside an already-configured project also brings that project's Sentience-managed hook configuration up to date for the running install (upgrade/reinstall recovery). This never configures a project that has no Sentience configuration, never touches the shared `settings.json`, and never blocks the command you ran — if the configuration can't be updated safely, you get one warning line on stderr instead.
 
 `--mcp` (new in 0.3.0) additionally registers the [Sentience MCP server](#sentience-mcp-server) into the project's `.mcp.json` and prints a consent notice. It is opt-in: without `--mcp`, nothing MCP-related is registered. Needs the server extra, installed into the same environment as the CLI: `pip install "sentience-governor[mcp]"` in a virtualenv, or `pipx install --force "sentience-governor[mcp]"` for a pipx-managed install.
 
