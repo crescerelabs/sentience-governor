@@ -1631,3 +1631,55 @@ def test_cp5_non_project_reports_volume_not_location_count(config_root, home):
     # The old, noisy formulation must not return.
     assert "3 other locations" not in rendered
     assert "other location" not in rendered
+
+
+def test_cp7_non_project_only_session_does_not_stand_out(config_root, home):
+    """CP7 erratum: a session whose findings are ALL `non_project` does not
+    become a standout when a stronger session exists.
+
+    On the real corpus this is what pushed a one-standout history into
+    State N, costing the hero screen (§16's primary conversion target) to
+    surface a git worktree.
+    """
+    source = git_repo(home, "repo-src")
+    dest = git_repo(home, "repo-b")
+    worktree = git_repo(home, "repo-wt", as_file=True)
+    result = scan_records(config_root, [
+        activity("s-strong", cwd=str(source),
+                 tools=[write_block(dest / "f.txt")]),
+        activity("s-weak", cwd=str(source),
+                 tools=[write_block(worktree / "g.txt")] * 9),
+    ])
+
+    assert result["sessions_with_findings"] == ["s-strong"]
+    # The weaker session keeps its findings in the aggregate and --json;
+    # only its promotion to headline changes.
+    assert {f.session_id for f in result["findings"]} == {"s-strong", "s-weak"}
+    assert "s-weak" in json.dumps(retro.json_payload(result))
+
+    rendered = render_scan(result)
+    assert "One session stands out." in rendered      # the hero, not State N
+    assert "sessions stand out" not in rendered
+
+
+def test_cp7_non_project_only_corpus_still_stands_out(config_root, home):
+    """CP7 erratum, the safety half: when nothing stronger exists, the best
+    `non_project` sessions still stand out.
+
+    Without this fallback the screen would render State 0 — "No reportable
+    project-boundary write activity was found" — on a history where Reader
+    did record write operations it simply cannot attribute to a project.
+    """
+    source = git_repo(home, "repo-src")
+    downloads = home / "Downloads"
+    downloads.mkdir()
+    result = scan_records(config_root, [
+        activity("s-only", cwd=str(source), tools=[
+            write_block(downloads / ("z%d.txt" % i)) for i in range(4)]),
+    ])
+
+    assert result["sessions_with_findings"] == ["s-only"]
+    rendered = render_scan(result)
+    assert "One session stands out." in rendered
+    assert "No reportable project-boundary write activity" not in rendered
+    assert "Reader cannot identify a project today" in flat(rendered)

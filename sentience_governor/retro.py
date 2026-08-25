@@ -375,6 +375,41 @@ def rank_sessions(findings: list, session_labels: dict) -> list:
     return sorted(summary, key=sort_key)
 
 
+# Classes strong enough to promote a session to a standout. `non_project`
+# is rank-3 supporting evidence (§5.2: "reported separately, never folded
+# into the cross-project headline"), so on its own it does not make a
+# session the headline — see `select_standout_sessions`.
+_STANDOUT_CLASSES = frozenset({"claude_config", "cross_project"})
+
+
+def select_standout_sessions(findings: list, session_labels: dict) -> list:
+    """The sessions that stand out, in §8.4 ranked order.
+
+    Post-CP5 erratum. §8.1 selected on any finding, which let a session
+    whose findings are ALL `non_project` become a top-level standout. On
+    the real corpus that promoted a git worktree — technically accurate,
+    since Reader genuinely cannot identify a project there, but
+    unsurprising next to a real cross-project finding, and it cost the
+    hero screen by pushing a one-standout corpus into State N.
+
+    A `non_project`-only session therefore stands out only when nothing
+    stronger exists. That fallback matters: without it a corpus carrying
+    only `non_project` findings would render State 0, whose normative
+    copy says no reportable activity was found — false when Reader
+    recorded write operations it simply cannot attribute to a project.
+
+    Selection only. Findings, classification, ranking and the aggregate
+    are unchanged; a non-standout session keeps its findings in the
+    aggregate and the `--json` payload.
+    """
+    ranked = rank_sessions(findings, session_labels)
+    strong = {f.session_id for f in findings
+              if f.finding_class in _STANDOUT_CLASSES}
+    if strong:
+        return [sid for sid in ranked if sid in strong]
+    return ranked
+
+
 def _parse_since(since: str) -> Optional[timedelta]:
     """``7d`` / ``30d`` / ``all`` → window size, ``None`` meaning all."""
     if since == "all":
@@ -727,7 +762,7 @@ def scan(
     # truncates — display truncation can never masquerade as "strongest
     # findings" (§8.4).
     findings = rank_findings(findings, session_labels)
-    ranked_sessions = rank_sessions(findings, session_labels)
+    ranked_sessions = select_standout_sessions(findings, session_labels)
     findings_omitted = max(0, len(findings) - MAX_DISPLAY_FINDINGS)
     findings = findings[:MAX_DISPLAY_FINDINGS]
 
