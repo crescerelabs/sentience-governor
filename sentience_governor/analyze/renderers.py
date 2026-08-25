@@ -2123,6 +2123,37 @@ def _non_project_pairs(session_findings: List) -> List[tuple]:
     )
 
 
+def _location_prefix(target: str, home: str) -> str:
+    """The display prefix for an unidentifiable location.
+
+    A plain truncation to the first path component, never an inferred
+    root: several descendants of one old tree collapse to one honest
+    example line instead of implying Reader knows how many distinct
+    "locations" there were.
+    """
+    shown = _abbrev(target, home)
+    parts = [c for c in shown.split("/") if c]
+    if shown.startswith("~") and len(parts) >= 2:
+        return "~/%s/…" % parts[1]
+    if shown.startswith("/") and parts:
+        return "/%s/…" % parts[0]
+    return shown
+
+
+def _representative_locations(findings: List, home: str,
+                              limit: int = 5) -> List[str]:
+    totals: Dict[str, int] = {}
+    for finding in findings:
+        prefix = _location_prefix(finding.target, home)
+        totals[prefix] = totals.get(prefix, 0) + finding.op_count
+    ordered = sorted(totals.items(), key=lambda item: (-item[1], item[0]))
+    return [prefix for prefix, _ in ordered[:limit]]
+
+
+def _non_project_ops(findings: List) -> int:
+    return sum(finding.op_count for finding in findings)
+
+
 def _session_block(session_id: str, findings: List, labels: Dict,
                    home: str) -> List[str]:
     """One session in the State-1 shape: label, working-in, then evidence."""
@@ -2145,21 +2176,27 @@ def _session_block(session_id: str, findings: List, labels: Dict,
         lines.append("")
         lines.extend(_dest_rows(cross, home))
 
-    if non_project:
+    unidentified = [f for f in mine if f.finding_class == "non_project"]
+    if unidentified:
         lines.append("")
         # Never "outside any project": the claim is only about what Reader
-        # can identify now (§5.2, §8.1).
-        noun = "location" if len(non_project) == 1 else "locations"
+        # can identify now (§5.2, §8.1). Reported as operation VOLUME plus
+        # representative destinations — never as a count of distinct
+        # locations, which Reader does not know: descendants of one old
+        # tree would inflate it.
+        ops = _non_project_ops(unidentified)
         if cross:
-            headline = ("and into %d other %s where Reader cannot "
-                        "identify a project today:" % (len(non_project), noun))
+            headline = ("and %d write operations targeted locations where "
+                        "Reader cannot identify a project today:" % ops)
         else:
-            headline = ("Claude targeted writes into %d %s where "
-                        "Reader cannot identify a project today:"
-                        % (len(non_project), noun))
+            headline = ("Claude targeted %d write operations into locations "
+                        "where Reader cannot identify a project today:" % ops)
         lines.extend(_wrap_body(headline, indent="  "))
         lines.append("")
-        lines.extend(_dest_rows(non_project, home))
+        for prefix in _representative_locations(unidentified, home):
+            lines.append("    " + prefix)
+        lines.append("")
+        lines.append("  Showing representative destinations.")
 
     return lines
 
@@ -2298,10 +2335,10 @@ def render_scan(result: Dict[str, Any]) -> str:
                              % (len(cross), "" if len(cross) == 1 else "s"))
             elif non_project:
                 lines.extend(_wrap_body(
-                    "targeted writes into %d %s where Reader cannot "
-                    "identify a project today"
-                    % (len(non_project),
-                       "location" if len(non_project) == 1 else "locations"),
+                    "targeted %d write operations into locations where "
+                    "Reader cannot identify a project today"
+                    % _non_project_ops(
+                        [f for f in mine if f.finding_class == "non_project"]),
                     indent="     "))
             else:
                 lines.append("     targeted a write to its global configuration")

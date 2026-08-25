@@ -608,12 +608,24 @@ def test_20_normal_git_resolution(home):
     assert resolver.resolve(str(repo)) == (str(repo), "git")
 
 
-def test_21_git_file_resolves_to_that_directory(home):
-    """Plan test 21: `.git` file (user worktree) — resolves to that
-    directory, without reading `.git` contents."""
+def test_21_git_file_does_not_establish_project_identity(home):
+    """Plan test 21, as corrected by the post-CP5 erratum: a `.git` FILE is
+    ambiguous identity and must never establish a distinct project.
+
+    §5.4 originally accepted `.git` as file or directory. CP5 real-corpus
+    verification showed that asserting "another project" for two
+    worktrees of the SAME repository — the exact "Reader misunderstood my
+    history" failure the release is meant to avoid. Reader still does not
+    read `.git` contents; it degrades to UNKNOWN instead. Recall is
+    deliberately sacrificed to protect the first-contact trust screen.
+    """
     worktree = git_repo(home, "user-worktree", as_file=True)
     resolver = RootResolver(str(home))
-    assert resolver.resolve(str(worktree)) == (str(worktree), "git")
+    assert resolver.resolve(str(worktree)) == ("", "unknown")
+
+    # A `.git` directory still resolves normally.
+    plain = git_repo(home, "ordinary-repo")
+    assert resolver.resolve(str(plain)) == (str(plain), "git")
 
 
 def test_22_non_git_directory_is_unknown(home):
@@ -1152,9 +1164,11 @@ def test_52_state_one_is_the_hero_screen(config_root, home):
     assert '"Alpha work"' in rendered
     assert "working in  ~/repo-src" in rendered
     assert "Claude targeted writes into another project:" in rendered
-    # Resolver-honest wording, never "outside any project".
-    assert ("and into 1 other location where Reader cannot\n"
-            "  identify a project today:") in rendered
+    # Resolver-honest wording, never "outside any project", and reported
+    # as operation volume rather than an inferred count of locations.
+    assert ("and 1 write operations targeted locations where Reader"
+            in flat(rendered))
+    assert "Showing representative destinations." in rendered
     assert "outside any project" not in rendered
     # Hierarchy: the fact and its evidence precede the limitations.
     assert (rendered.index("One session stands out.")
@@ -1558,3 +1572,62 @@ def test_sentience_review_skill_installs_with_the_others(tmp_path):
     installed = skills_root / "sentience-review" / "SKILL.md"
     assert installed.is_file()
     assert "!`sentience scan`" in installed.read_text()
+
+
+# ---------------------------------------------------------------------------
+# CP6 — regressions for the two CP5 real-corpus discoveries
+# ---------------------------------------------------------------------------
+
+
+def test_cp5_same_repo_worktree_is_never_another_project(config_root, home):
+    """CP5 discovery 1: a user-created worktree of the SAME repository must
+    not produce a cross-project claim.
+
+    On the real corpus this rendered `~/sentience-governor` →
+    `~/sentience-governor-v031` as "another project" when both are one
+    repository. Reader does not read `.git` contents to tell them apart —
+    it declines to claim a project at all.
+    """
+    source = git_repo(home, "repo")            # .git directory
+    worktree = git_repo(home, "repo-wt", as_file=True)   # .git file
+    result = scan_records(config_root, [
+        activity("s", cwd=str(source), tools=[write_block(worktree / "f.txt")]),
+    ])
+
+    assert [f.finding_class for f in result["findings"]] == ["non_project"]
+    assert result["findings"][0].dest_root == ""
+    rendered = render_scan(result)
+    assert "another project" not in rendered
+    assert "Reader cannot identify a project today" in flat(rendered)
+
+
+def test_cp5_non_project_reports_volume_not_location_count(config_root, home):
+    """CP5 discovery 2: descendants of one tree must not be presented as
+    many distinct "locations".
+
+    Reader does not know how many locations there were; it knows the
+    operation volume and can show representative destinations.
+    """
+    source = git_repo(home, "repo-src")
+    tree = home / "deleted-tree"
+    for sub in ("source/.github/workflows", "source/pkg/profile", "evidence"):
+        (tree / sub).mkdir(parents=True)
+    result = scan_records(config_root, [
+        activity("s", cwd=str(source), tools=[
+            write_block(tree / "source/.github/workflows/ci.yml"),
+            write_block(tree / "source/pkg/profile/p.py"),
+            write_block(tree / "evidence/e.txt"),
+            write_block(tree / "evidence/e.txt"),
+        ]),
+    ])
+    rendered = render_scan(result)
+
+    # Three findings, one tree, four recorded operations.
+    assert len(result["findings"]) == 3
+    assert ("Claude targeted 4 write operations into locations where"
+            in flat(rendered))
+    assert "~/deleted-tree/…" in rendered
+    assert "Showing representative destinations." in rendered
+    # The old, noisy formulation must not return.
+    assert "3 other locations" not in rendered
+    assert "other location" not in rendered

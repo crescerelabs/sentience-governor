@@ -221,7 +221,10 @@ class RootResolver:
     def _git_root(self, directory: str) -> Optional[str]:
         """Step 2: nearest ancestor containing ``.git``, memoized per directory.
 
-        Walks strictly below ``$HOME`` — ``$HOME`` itself is never checked
+        Only a ``.git`` *directory* establishes a root; a ``.git`` *file*
+        marks the location ambiguous and stops the walk UNKNOWN (see the
+        inline erratum note). Walks strictly below ``$HOME`` — ``$HOME``
+        itself is never checked
         and never returned, so a dotfiles repository at ``~/.git`` cannot
         collapse every home path into one project. For paths outside
         ``$HOME`` the walk stops at ``/`` without checking it. The chain is
@@ -242,10 +245,28 @@ class RootResolver:
                 break
             chain.append(current)
             self.probed.append(current)
-            # `.git` as file or directory: a user worktree resolves to
-            # itself, the defensible answer without reading `.git`.
-            if os.path.exists(os.path.join(current, ".git")):
+            git_marker = os.path.join(current, ".git")
+            if os.path.isdir(git_marker):
+                # A `.git` DIRECTORY establishes an identifiable repository.
                 found = current
+                break
+            if os.path.exists(git_marker):
+                # A `.git` FILE is a worktree/submodule-style pointer, and
+                # in v0.3.1 that identity is ambiguous: the directory may
+                # be another checkout of the very repository the session
+                # was working in. Reader deliberately does not read `.git`
+                # contents to find out — that is the forensic machinery
+                # this release rejects — so the location is UNKNOWN for
+                # project-comparison purposes and can never carry a
+                # cross-project claim. Claude Code's own harness worktrees
+                # are handled earlier, by step 1.
+                #
+                # Erratum, post-lock: §5.4's "accepts `.git` as file or
+                # directory" was corrected after CP5 real-corpus
+                # verification showed it asserting "another project" for
+                # two worktrees of the SAME repository. Recall is
+                # deliberately sacrificed to avoid a false claim on the
+                # first-contact trust screen.
                 break
             parent = posixpath.dirname(current)
             if parent == current:
