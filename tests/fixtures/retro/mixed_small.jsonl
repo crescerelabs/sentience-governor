@@ -1,0 +1,6 @@
+{"type": "user", "sessionId": "s-alpha", "cwd": "/home/user/proj-a", "timestamp": "2026-08-01T10:00:00.000Z", "uuid": "u1", "message": {"role": "user", "content": "start"}}
+{"type": "assistant", "sessionId": "s-alpha", "slug": "alpha-slug", "cwd": "/home/user/proj-a", "timestamp": "2026-08-01T10:00:05.000Z", "uuid": "u2", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "Write", "input": {"file_path": "notes/a.txt", "content": "payload-A"}}]}}
+{"type": "custom-title", "customTitle": "Alpha work", "sessionId": "s-alpha"}
+{"type": "assistant", "sessionId": "s-alpha", "cwd": "/home/user/proj-a", "timestamp": "2026-08-01T10:01:00.000Z", "uuid": "u3", "futureField": {"nested": [1, 2]}, "anotherNewKey": "x", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "t2", "name": "Bash", "input": {"command": "cat /etc/passwd"}}]}}
+{"type": "queue-operation", "operation": "enqueue", "sessionId": "s-alpha", "timestamp": "2026-08-01T10:02:00.000Z", "content": "ignored"}
+{"type": "assistant", "sessionId": "s-alpha", "cwd": "/home/user/proj-a", "timestamp": "2026-08-01T10:03:00.000Z", "uuid": "u4", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "t3", "name": "Read", "input": {"file_path": "/home/user/proj-a/README.md"}}]}}
