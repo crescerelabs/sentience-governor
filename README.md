@@ -25,6 +25,16 @@ For real output, see [See it work](#see-it-work) below.*
 
 ---
 
+## What's new
+
+**0.3.0.4** stops a Claude Code restart from leaving an empty session in your
+trace directory and taking over `sentience status` as your last session. Empty
+sessions are no longer created, `status` reports your newest session with
+recorded activity, and any already on disk stay listed and labelled. Full
+detail in the [changelog](CHANGELOG.md).
+
+---
+
 ## Quickstart
 
 ```bash

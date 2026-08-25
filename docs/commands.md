@@ -80,6 +80,8 @@ Sentience is governing your Claude Code sessions locally.
 
 Policy violations and advisory flags are reported separately (new in 0.2.8). Add `--json` for a machine-readable view that also exposes the count reconciliation: per-category totals, baseline-filtered codes, and the raw total (`raw_total = policy + advisory + baseline_filtered_total`).
 
+From 0.3.0.4, the reported session is your newest one with recorded activity. Empty sessions (a Claude Code restart could leave one behind before 0.3.0.4) are passed over, and the report says how many; `--json` lists them under `transient_sessions`. If every session on disk is empty, the newest is shown and labelled.
+
 ### `sentience list`
 
 One line per session, newest first, max 20.
@@ -92,7 +94,7 @@ Sentience Sessions
  2. e91b8a7f-c3d2     4h ago   128 events   ✓ 0v/0a
 ```
 
-The glyph splits the counts: `Nv` policy violations / `Ma` advisory flags (new in 0.2.8).
+The glyph splits the counts: `Nv` policy violations / `Ma` advisory flags (new in 0.2.8). From 0.3.0.4, a session with no recorded activity is labelled `transient — no activity` in place of the glyph.
 
 ### `sentience init claude-code [path]`
 

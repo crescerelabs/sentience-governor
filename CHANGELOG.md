@@ -5,6 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.0.4] — 2026-08-25
+
+**Patch release.** Restarting Claude Code left an empty session in your trace
+directory, and because it was the newest one, `sentience status` reported it as
+your last session instead of the one you had actually been working in. This
+release stops those empty sessions from being created and teaches the reporting
+commands to look past any already on disk.
+
+### Fixed
+- **A Claude Code restart no longer creates an empty session trace.** On
+  restart, Claude Code opens a session, closes it immediately, and sends
+  Sentience the session-ended event for it. Sentience registered that session
+  before discovering there was nothing in it, leaving a two-event trace (plus
+  its index) for a session that never ran a single tool call. Sentience now
+  checks the session's transcript first and writes nothing when there is
+  positively nothing to record. Sessions that did real work are unaffected,
+  including a session whose only contact with Sentience is its end: if the
+  transcript has turns, the full trace is written as before. If the transcript
+  cannot be read or parsed, Sentience keeps its previous behaviour rather than
+  assume the session was empty.
+- **`sentience status` reports your newest session with recorded activity.**
+  Empty sessions from earlier restarts stay on disk, untouched, and are
+  disclosed rather than hidden: the report names how many were passed over, and
+  `--json` lists them under a new `transient_sessions` key. When every session
+  is empty, the newest is shown and labelled as such.
+- **`sentience list` labels empty sessions** as `transient — no activity`
+  instead of giving them a clean-verdict glyph, which said nothing useful about
+  a session that never acted. They remain listed; nothing is deleted or
+  rewritten.
+
+### Notes
+- No existing trace is modified, compacted, or removed by this release.
+- `status --json` gains `transient_sessions`; no existing key changes shape.
+
 ## [0.3.0.3] — 2026-08-24
 
 **Patch release.** Uninstalling or relocating the package used to leave a
