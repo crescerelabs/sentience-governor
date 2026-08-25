@@ -250,14 +250,32 @@ class TestIdempotencyAndFailOpen:
 
     def test_missing_transcript_path_is_fail_open(self, sink_path: Path):
         # SessionEnd with no transcript_path → no token snapshots, no crash.
+        # v0.3.0.4 (P9): for an UNSEEN session this is the ghost signature —
+        # the gate now creates no artifact at all.
         _run({"hook_event_name": "SessionEnd", "session_id": SESSION}, sink_path)
         assert _token_snapshots(_read_events(sink_path)) == []
+        assert not sink_path.exists()
+
+    def test_missing_transcript_path_existing_session_trace_untouched(
+        self, sink_path: Path
+    ):
+        # v0.3.0.4 (P9): the same payload against an EXISTING session leaves
+        # the trace exactly as it was — the gate never fires, and the batch
+        # emitter's fail-open path appends nothing.
+        _run(_pre("Read", session=SESSION), sink_path)
+        before = _read_events(sink_path)
+        assert before  # real session exists
+        _run({"hook_event_name": "SessionEnd", "session_id": SESSION}, sink_path)
+        assert _read_events(sink_path) == before
 
     def test_missing_transcript_file_is_fail_open(
         self, sink_path: Path, tmp_path: Path
     ):
         _run(_session_end(tmp_path / "does_not_exist.jsonl"), sink_path)
         assert _token_snapshots(_read_events(sink_path)) == []
+        # v0.3.0.4 (P9): positively-absent transcript on an unseen session
+        # → no artifact.
+        assert not sink_path.exists()
 
     def test_malformed_transcript_partial_success(
         self, sink_path: Path, tmp_path: Path
@@ -269,3 +287,160 @@ class TestIdempotencyAndFailOpen:
         snaps = _token_snapshots(_read_events(sink_path))
         # The complete turn still emits; the truncated tail is skipped.
         assert {s["payload"]["llm_turn_id"] for s in snaps} == {"req_G"}
+
+# ---------------------------------------------------------------------------
+# v0.3.0.4 — SessionEnd first-invocation ghost gate (plan §5 / §10 P1–P8).
+# ---------------------------------------------------------------------------
+
+
+def _sidecar(sink: Path) -> Path:
+    return Path(str(sink) + ".index")
+
+
+class TestSessionEndGhostGate:
+    """A SessionEnd arriving as the first-ever hook invocation for its
+    session id creates NO artifact when the empty condition is positively
+    established, creates the full legitimate session when the transcript
+    positively has emittable turns, and falls through to the pre-gate
+    fail-open flow on stat/parse uncertainty."""
+
+    GHOST = "sess-ghost-001"
+
+    def test_p1_no_transcript_path_creates_no_artifact(self, sink_path: Path):
+        _run(
+            {"hook_event_name": "SessionEnd", "session_id": self.GHOST},
+            sink_path,
+        )
+        assert not sink_path.exists()
+        assert not _sidecar(sink_path).exists()
+
+    def test_p2_transcript_positively_absent_creates_no_artifact(
+        self, sink_path: Path, tmp_path: Path
+    ):
+        _run(
+            _session_end(tmp_path / "never_written.jsonl", session=self.GHOST),
+            sink_path,
+        )
+        assert not sink_path.exists()
+        assert not _sidecar(sink_path).exists()
+
+    def test_p3_zero_emittable_turns_creates_no_artifact(
+        self, sink_path: Path, tmp_path: Path
+    ):
+        # (a) an empty transcript file parses normally to zero turns;
+        empty = tmp_path / "empty.jsonl"
+        empty.write_text("", encoding="utf-8")
+        _run(_session_end(empty, session=self.GHOST), sink_path)
+        assert not sink_path.exists()
+        # (b) a turn with neither populated tokens nor tool calls is not
+        # emittable — still positively empty.
+        idle = tmp_path / "idle.jsonl"
+        _write_transcript(idle, [_assistant("req_idle")])
+        _run(_session_end(idle, session=self.GHOST), sink_path)
+        assert not sink_path.exists()
+        assert not _sidecar(sink_path).exists()
+
+    def test_p4_parser_crash_is_uncertain_and_falls_through(
+        self, sink_path: Path, tmp_path: Path, monkeypatch
+    ):
+        # UNCERTAIN must preserve today's fail-open semantics: REG + null
+        # INTENT are written exactly as v0.3.0.3 would have, no snapshots,
+        # no crash. A potentially legitimate session is never suppressed.
+        import sentience_governor.wrapper.claude_code_hook as hook_mod
+
+        path = tmp_path / "t.jsonl"
+        _write_transcript(
+            path, [_assistant("req_A", usage=_usage(1, 0, 0, 9))]
+        )
+
+        def boom(_p):
+            raise RuntimeError("injected parser crash")
+
+        monkeypatch.setattr(hook_mod, "parse_transcript_file", boom)
+        _run(_session_end(path, session=self.GHOST), sink_path)
+        events = _read_events(sink_path)
+        assert [e["event_type"] for e in events[:2]] == [
+            "AGENT_REGISTERED",
+            "INTENT_DECLARED",
+        ]
+        assert _token_snapshots(events) == []
+
+    def test_p4b_stat_permission_error_is_uncertain_and_falls_through(
+        self, sink_path: Path, tmp_path: Path
+    ):
+        blocked = tmp_path / "blocked"
+        blocked.mkdir()
+        t = blocked / "t.jsonl"
+        _write_transcript(t, [_assistant("req_A", usage=_usage(1, 0, 0, 9))])
+        blocked.chmod(0o000)
+        try:
+            _run(_session_end(t, session=self.GHOST), sink_path)
+        finally:
+            blocked.chmod(0o755)
+        events = _read_events(sink_path)
+        # PermissionError is not FileNotFoundError → UNCERTAIN → REG +
+        # INTENT written per the pre-gate flow (whatever the batch then
+        # does under its own fail-open, no snapshots can exist).
+        assert [e["event_type"] for e in events[:2]] == [
+            "AGENT_REGISTERED",
+            "INTENT_DECLARED",
+        ]
+        assert _token_snapshots(events) == []
+
+    def test_p5_token_bearing_turn_creates_full_session_single_parse(
+        self, sink_path: Path, tmp_path: Path, monkeypatch
+    ):
+        import sentience_governor.wrapper.claude_code_hook as hook_mod
+
+        real_parse = hook_mod.parse_transcript_file
+        calls = {"n": 0}
+
+        def counting(p):
+            calls["n"] += 1
+            return real_parse(p)
+
+        monkeypatch.setattr(hook_mod, "parse_transcript_file", counting)
+        path = tmp_path / "t.jsonl"
+        _write_transcript(
+            path, [_assistant("req_A", usage=_usage(1, 0, 0, 9))]
+        )
+        _run(_session_end(path, session=self.GHOST), sink_path)
+        events = _read_events(sink_path)
+        assert [e["event_type"] for e in events[:2]] == [
+            "AGENT_REGISTERED",
+            "INTENT_DECLARED",
+        ]
+        snaps = _token_snapshots(events)
+        assert {s["payload"]["llm_turn_id"] for s in snaps} == {"req_A"}
+        assert _sidecar(sink_path).exists()
+        # The gate's parse is passed through — never parsed twice.
+        assert calls["n"] == 1
+
+    def test_p6_tool_use_only_turn_creates_session(
+        self, sink_path: Path, tmp_path: Path
+    ):
+        path = tmp_path / "t.jsonl"
+        _write_transcript(
+            path, [_assistant("req_T", tool_uses=[("toolu_1", "Read")])]
+        )
+        _run(_session_end(path, session=self.GHOST), sink_path)
+        assert sink_path.exists()
+        snaps = _token_snapshots(_read_events(sink_path))
+        assert {s["payload"]["llm_turn_id"] for s in snaps} == {"req_T"}
+
+    def test_p8_existing_zero_byte_trace_keeps_current_behavior(
+        self, sink_path: Path
+    ):
+        # The 0-byte special case is deliberately NOT part of this patch:
+        # the gate keys on exists() alone, so a pre-existing empty file
+        # gets exactly the pre-gate behavior (REG + INTENT appended).
+        sink_path.write_text("", encoding="utf-8")
+        _run(
+            {"hook_event_name": "SessionEnd", "session_id": self.GHOST},
+            sink_path,
+        )
+        events = _read_events(sink_path)
+        assert [e["event_type"] for e in events] == [
+            "AGENT_REGISTERED",
+            "INTENT_DECLARED",
+        ]
