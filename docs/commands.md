@@ -96,7 +96,16 @@ The glyph splits the counts: `Nv` policy violations / `Ma` advisory flags (new i
 
 ### `sentience init claude-code [path]`
 
-Wires the Claude Code hook into a project's `.claude/settings.json` so every tool call in that project emits a governance event — and installs the six `/sentience-*` slash commands (new in 0.2.8).
+> **Requires Claude Code v2.1.211 or later** (from sentience-governor 0.3.0.3).
+> The hook binding is written to the machine-local `.claude/settings.local.json`,
+> which Claude Code resolves at the repository root from that version onward.
+> Sentience cannot reliably determine which Claude Code version will read this
+> configuration; on older versions the integration may silently capture nothing.
+
+Wires the Claude Code hook into a project's machine-local
+`.claude/settings.local.json` (from 0.3.0.3; earlier releases wrote the shared
+`.claude/settings.json`) so every tool call in that project emits a governance
+event — and installs the six `/sentience-*` slash commands (new in 0.2.8).
 
 ```bash
 sentience init claude-code             # wire the current directory + install skills
