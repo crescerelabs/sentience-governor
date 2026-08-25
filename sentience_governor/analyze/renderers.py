@@ -1979,3 +1979,359 @@ def _pulse_markdown_footer(result: Dict[str, Any]) -> Optional[str]:
         "_Join the list: "
         "[getsentience.ai/sentience-sync](https://getsentience.ai/sentience-sync)_"
     )
+
+
+# ---------------------------------------------------------------------------
+# Retrospective session reader (v0.3.1) — `sentience scan` / `/sentience-review`
+#
+# The screens are the product hypothesis, not incidental renderer output
+# (plan §8.1). The strings below marked normative are locked plan text and
+# must not be reworded here; the report is a *reviewer's* account, never a
+# governance verdict.
+# ---------------------------------------------------------------------------
+
+_SCAN_HEADER = "Sentience · Retrospective Review"
+
+# Normative (§8.1, test 51b): the single canonical reviewer statement, on
+# every screen including State N. No state may substitute a shorthand.
+_REVIEWER_STATEMENT = (
+    "Reader is a retrospective reviewer, not live governance.\n"
+    "It cannot establish what you intended or authorized, or\n"
+    "whether an action complied with policy."
+)
+
+# Normative (§7.2, test 50): attempt-grade language. An assistant record
+# proves Claude *issued* the write; completion evidence lives in
+# `toolUseResult`, which Reader never inspects.
+_WRITE_QUALIFIER = (
+    "Counts are write operations Claude issued as recorded in\n"
+    "its history. Reader does not verify completion."
+)
+
+# Normative (§8.1/§8.3): the identical closing bridge on all screens.
+_CLOSING_BRIDGE = (
+    "This review is an example of what retrospective history\n"
+    "can reveal. Sentience Governor goes further by evaluating\n"
+    "declared objective, scope, execution and policy while the\n"
+    "agent is running."
+)
+
+_SCAN_FOOTER = "  sentience init claude-code        govern the next session"
+
+_PROMPT_EXCLUSION = "Reader does not inspect or use your prompt content."
+
+# Normative (§8.1, test 51): State 0 leads with what was *found*, never with
+# confinement ("everything stayed inside"). A successful zero screen, not
+# reassurance — never "0 findings", never "nothing to report".
+_STATE_0_LEAD = (
+    "No reportable project-boundary write activity was found\n"
+    "in the activity Reader could classify."
+)
+
+# A presentation line, not a reviewer-statement substitute (§8.1).
+_LIST_CAPTION = "Showing the strongest retrospective findings first."
+
+_MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun",
+           "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+_DEST_ROWS_CAP = 10          # per-session destination rows (§8.4)
+_DETAIL_SESSIONS = 3         # State N: detail for the strongest few
+_BODY_WIDTH = 52
+
+
+def _scan_date(iso: str) -> str:
+    from datetime import datetime as _dt
+    parsed = _dt.fromisoformat(iso)
+    return "%s %d" % (_MONTHS[parsed.month - 1], parsed.day)
+
+
+def _abbrev(path: str, home: str) -> str:
+    """Display form of a path: home-anchored paths render as ``~/…``."""
+    if not path:
+        return path
+    if home:
+        home = home.rstrip("/")
+        if path == home:
+            return "~"
+        if path.startswith(home + "/"):
+            return "~" + path[len(home):]
+    return path
+
+
+def _ops(count: int) -> str:
+    return "1 op" if count == 1 else "%d ops" % count
+
+
+def _wrap_body(text: str, indent: str = "") -> List[str]:
+    import textwrap
+    return textwrap.wrap(
+        text, width=_BODY_WIDTH + len(indent),
+        initial_indent=indent, subsequent_indent=indent,
+    ) or [indent.rstrip()]
+
+
+def _dest_rows(pairs: List[tuple], home: str) -> List[str]:
+    """Destination rows, strongest first, truncated with an explicit line."""
+    ordered = sorted(pairs, key=lambda item: (-item[1], item[0]))
+    rows = []
+    for path, count in ordered[:_DEST_ROWS_CAP]:
+        label = _abbrev(path, home)
+        rows.append("    " + label.ljust(28) + "%4d %s" % (
+            count, "op" if count == 1 else "ops"))
+    remaining = len(ordered) - _DEST_ROWS_CAP
+    if remaining > 0:
+        rows.append("    … and %d more destinations" % remaining)
+    return rows
+
+
+def _session_findings(findings: List, session_id: str) -> List:
+    return [f for f in findings if f.session_id == session_id]
+
+
+def _group_totals(findings: List, key) -> List[tuple]:
+    totals: Dict[str, int] = {}
+    for finding in findings:
+        bucket = key(finding)
+        totals[bucket] = totals.get(bucket, 0) + finding.op_count
+    return list(totals.items())
+
+
+def _session_label_line(session_id: str, labels: Dict, indent: str) -> str:
+    """The session's label. The fallback must look deliberate (§7.3), so an
+    8-character session ID renders bare rather than quoted."""
+    entry = labels.get(session_id) or {}
+    label = entry.get("label") or session_id[:8]
+    if entry.get("source") == "session-id" or not entry:
+        return indent + label
+    return indent + '"%s"' % label
+
+
+def _cross_project_pairs(session_findings: List) -> List[tuple]:
+    return _group_totals(
+        [f for f in session_findings if f.finding_class == "cross_project"],
+        lambda f: f.dest_root,
+    )
+
+
+def _non_project_pairs(session_findings: List) -> List[tuple]:
+    # Grouped by the target's containing directory: Reader cannot identify a
+    # project for these, so the directory is the honest unit of "location".
+    import posixpath
+    return _group_totals(
+        [f for f in session_findings if f.finding_class == "non_project"],
+        lambda f: posixpath.dirname(f.target),
+    )
+
+
+def _session_block(session_id: str, findings: List, labels: Dict,
+                   home: str) -> List[str]:
+    """One session in the State-1 shape: label, working-in, then evidence."""
+    mine = _session_findings(findings, session_id)
+    lines = [_session_label_line(session_id, labels, "  ")]
+    source_root = next((f.source_root for f in mine if f.source_root), "")
+    if source_root:
+        lines.append("   working in  " + _abbrev(source_root, home))
+
+    cross = _cross_project_pairs(mine)
+    non_project = _non_project_pairs(mine)
+
+    if cross:
+        lines.append("")
+        if len(cross) == 1:
+            lines.append("  Claude targeted writes into another project:")
+        else:
+            lines.append(
+                "  Claude targeted writes into %d other projects:" % len(cross))
+        lines.append("")
+        lines.extend(_dest_rows(cross, home))
+
+    if non_project:
+        lines.append("")
+        # Never "outside any project": the claim is only about what Reader
+        # can identify now (§5.2, §8.1).
+        noun = "location" if len(non_project) == 1 else "locations"
+        if cross:
+            headline = ("and into %d other %s where Reader cannot "
+                        "identify a project today:" % (len(non_project), noun))
+        else:
+            headline = ("Claude targeted writes into %d %s where "
+                        "Reader cannot identify a project today:"
+                        % (len(non_project), noun))
+        lines.extend(_wrap_body(headline, indent="  "))
+        lines.append("")
+        lines.extend(_dest_rows(non_project, home))
+
+    return lines
+
+
+def _claude_config_sentence(config_findings: List, home: str) -> str:
+    sessions = {f.session_id for f in config_findings}
+    targets: List[str] = []
+    for finding in config_findings:
+        shown = _abbrev(finding.target, home)
+        if shown not in targets:
+            targets.append(shown)
+    where = ("In one session" if len(sessions) == 1
+             else "In %d sessions" % len(sessions))
+    verb = ("targeted a write" if len(config_findings) == 1
+            else "targeted writes")
+    if len(targets) == 1:
+        listed = targets[0]
+    else:
+        listed = ", ".join(targets[:2])
+        if len(targets) > 2:
+            listed += ", and %d more" % (len(targets) - 2)
+    return ("%s, Claude %s to its global configuration (%s), which can "
+            "affect future Claude sessions." % (where, verb, listed))
+
+
+def _coverage_limits(result: Dict[str, Any]) -> List[str]:
+    """Coverage limits, shown only when non-zero (§8.2)."""
+    parts = []
+    scanned = result.get("files_scanned", 0)
+    unreadable = result.get("files_unreadable", 0)
+    if unreadable:
+        parts.append("%d of %d files read" % (scanned, scanned + unreadable))
+        parts.append("%d unreadable" % unreadable)
+    for count, text in (
+        (result.get("lines_malformed", 0), "malformed records skipped"),
+        (result.get("lines_oversize", 0), "oversize records skipped"),
+        (result.get("records_undated", 0), "undated records"),
+        (result.get("unknown_targets", 0), "targets Reader could not classify"),
+        (result.get("unknown_root_writes", 0),
+         "writes whose source project could not be identified"),
+    ):
+        if count:
+            parts.append("%d %s" % (count, text))
+    suppressed = sum((result.get("suppressed") or {}).values())
+    if suppressed:
+        parts.append("%d auto-maintained records suppressed" % suppressed)
+    if result.get("findings_omitted", 0):
+        parts.append("%d findings not shown" % result["findings_omitted"])
+    if result.get("targets_omitted", 0):
+        parts.append(
+            "%d targets beyond the collection bound were not ranked"
+            % result["targets_omitted"])
+    if not parts:
+        return []
+    return _wrap_body(" · ".join(parts), indent="  ")
+
+
+def _not_evaluated(result: Dict[str, Any], standout: List[str]) -> List[str]:
+    """Bash and coverage limits, always outside the aha paragraph (§8.1)."""
+    by_session = result.get("by_session") or {}
+    if len(standout) == 1:
+        shell = by_session.get(standout[0], {}).get("shell_calls", 0)
+        shell_line = "%s shell commands in this session" % format(shell, ",")
+    elif standout:
+        shell = sum(by_session.get(sid, {}).get("shell_calls", 0)
+                    for sid in standout)
+        shell_line = "%s shell commands across these sessions" % format(shell, ",")
+    else:
+        shell_line = "%s shell commands" % format(result.get("shell_calls", 0), ",")
+
+    lines = ["Not evaluated", "  " + shell_line, "  " + _PROMPT_EXCLUSION]
+    lines.extend(_coverage_limits(result))
+    return lines
+
+
+def render_scan(result: Dict[str, Any]) -> str:
+    """Render a :func:`sentience_governor.retro.scan` result (plan §8).
+
+    Three first-class states, selected by how many sessions stand out —
+    never by finding count, which is never explained to a first-run user.
+    Pure: every input, including the private ``_home`` prefix used to
+    abbreviate paths for display, arrives in ``result``.
+    """
+    findings = list(result.get("findings") or [])
+    labels = result.get("session_labels") or {}
+    home = result.get("_home") or ""
+    standout = list(result.get("sessions_with_findings") or [])
+
+    sessions = result.get("sessions", 0)
+    lines = [_SCAN_HEADER, ""]
+    lines.append("%d Claude Code session%s reviewed"
+                 % (sessions, "" if sessions == 1 else "s"))
+    period_start, period_end = result.get("period_start"), result.get("period_end")
+    provenance = "local · transcripts read-only"
+    if period_start and period_end:
+        lines.append("%s → %s · %s" % (_scan_date(period_start),
+                                       _scan_date(period_end), provenance))
+    else:
+        lines.append(provenance)
+    lines.append("")
+
+    # Rank-1 findings get their own sentence, first, in any state (§8.2).
+    config_findings = [f for f in findings if f.finding_class == "claude_config"]
+    if config_findings:
+        lines.extend(_wrap_body(_claude_config_sentence(config_findings, home)))
+        lines.append("")
+
+    if not standout:
+        lines.extend(_STATE_0_LEAD.split("\n"))
+        lines.append("")
+        lines.extend(_REVIEWER_STATEMENT.split("\n"))
+    elif len(standout) == 1:
+        # The hero screen: the surprising human-readable fact first, then
+        # the evidence, then the limitations. No padding.
+        lines.append("One session stands out.")
+        lines.append("")
+        lines.extend(_session_block(standout[0], findings, labels, home))
+        lines.append("")
+        lines.extend(_WRITE_QUALIFIER.split("\n"))
+        lines.append("")
+        lines.extend(_REVIEWER_STATEMENT.split("\n"))
+    else:
+        lines.append("%d sessions stand out." % len(standout))
+        lines.append("")
+        for position, session_id in enumerate(standout, start=1):
+            mine = _session_findings(findings, session_id)
+            label = _session_label_line(session_id, labels, "").strip()
+            lines.append("  %d. %s" % (position, label))
+            source_root = next((f.source_root for f in mine if f.source_root), "")
+            if source_root:
+                lines.append("     working in  " + _abbrev(source_root, home))
+            cross = _cross_project_pairs(mine)
+            non_project = _non_project_pairs(mine)
+            if cross:
+                lines.append("     targeted writes into %d other project%s"
+                             % (len(cross), "" if len(cross) == 1 else "s"))
+            elif non_project:
+                lines.extend(_wrap_body(
+                    "targeted writes into %d %s where Reader cannot "
+                    "identify a project today"
+                    % (len(non_project),
+                       "location" if len(non_project) == 1 else "locations"),
+                    indent="     "))
+            else:
+                lines.append("     targeted a write to its global configuration")
+            lines.append("")
+        lines.append(_LIST_CAPTION)
+        lines.append("")
+        # Rendered directly under the caption, where verdict-reading would
+        # otherwise happen (§8.1).
+        lines.extend(_REVIEWER_STATEMENT.split("\n"))
+        for session_id in standout[:_DETAIL_SESSIONS]:
+            lines.append("")
+            lines.extend(_session_block(session_id, findings, labels, home))
+        remaining = len(standout) - _DETAIL_SESSIONS
+        if remaining > 0:
+            lines.append("")
+            lines.append("  … and %d more session%s not detailed here"
+                         % (remaining, "" if remaining == 1 else "s"))
+        lines.append("")
+        lines.extend(_WRITE_QUALIFIER.split("\n"))
+
+    declaration = result.get("sessions_with_declaration_activity") or []
+    if declaration:
+        lines.append("")
+        lines.append("Declared-intent activity in %d of %d sessions."
+                     % (len(declaration), sessions))
+
+    lines.append("")
+    lines.extend(_not_evaluated(result, standout))
+    lines.append("")
+    lines.extend(_CLOSING_BRIDGE.split("\n"))
+    lines.append("")
+    lines.append(_SCAN_FOOTER)
+    return "\n".join(lines) + "\n"

@@ -47,6 +47,10 @@ _SINCE_CHOICES = ("7d", "30d", "all")
 # so, because past this point collection itself is scan-order-bounded.
 MAX_TARGETS = 10_000
 
+# Display cap on findings (§8.4). Ranking is computed before truncation and
+# `findings_omitted` states what display dropped.
+MAX_DISPLAY_FINDINGS = 500
+
 # Defensive belt-and-braces on the parent walk. The walk is a finite lexical
 # parent chain and cannot cycle by construction, but the cap means that
 # property does not depend on the implementer avoiding ``resolve()``.
@@ -282,6 +286,72 @@ class RootResolver:
 
         # Step 4 — UNKNOWN. Never a fabricated root.
         return "", "unknown"
+
+
+# Finding-class precedence (§8.4): claude_config, then cross_project, then
+# non_project. No numerical risk score, probability, severity model or
+# confidence percentage exists anywhere in Reader.
+_CLASS_RANK = {"claude_config": 0, "cross_project": 1, "non_project": 2}
+
+
+def _label_of(session_labels: dict, session_id: str) -> str:
+    entry = session_labels.get(session_id)
+    return entry["label"] if entry else session_id
+
+
+def rank_findings(findings: list, session_labels: dict) -> list:
+    """Order findings per §8.4 — a total order, so rendering is reproducible.
+
+    (1) finding class; (2) within class, distinct-target count per
+    (session, dest root) descending; (3) op_count descending; (4) session
+    label, then target, ascending.
+    """
+    distinct: dict = {}
+    for finding in findings:
+        key = (finding.session_id, finding.dest_root)
+        distinct[key] = distinct.get(key, 0) + 1
+
+    def sort_key(finding):
+        return (
+            _CLASS_RANK.get(finding.finding_class, len(_CLASS_RANK)),
+            -distinct[(finding.session_id, finding.dest_root)],
+            -finding.op_count,
+            _label_of(session_labels, finding.session_id),
+            finding.target,
+        )
+
+    return sorted(findings, key=sort_key)
+
+
+def rank_sessions(findings: list, session_labels: dict) -> list:
+    """Order standout sessions per §8.4 — State N's rows and detail order.
+
+    (1) best finding class present in the session; (2) total distinct
+    targets across the session's findings, descending; (3) total op_count,
+    descending; (4) session label ascending.
+    """
+    summary: dict = {}
+    for finding in findings:
+        entry = summary.setdefault(
+            finding.session_id,
+            {"best": len(_CLASS_RANK), "targets": set(), "ops": 0},
+        )
+        entry["best"] = min(
+            entry["best"], _CLASS_RANK.get(finding.finding_class, len(_CLASS_RANK))
+        )
+        entry["targets"].add(finding.target)
+        entry["ops"] += finding.op_count
+
+    def sort_key(session_id):
+        entry = summary[session_id]
+        return (
+            entry["best"],
+            -len(entry["targets"]),
+            -entry["ops"],
+            _label_of(session_labels, session_id),
+        )
+
+    return sorted(summary, key=sort_key)
 
 
 def _parse_since(since: str) -> Optional[timedelta]:
@@ -627,12 +697,18 @@ def scan(
             source_root_evidence=source_evidence,
             dest_root=dest_root,
         )
-        # Deterministic collection order; the §8.4 display ranking is the
-        # renderer's concern and runs over the full collected aggregate.
         for (session_id, finding_class, target), (
             op_count, tool, source_root, source_evidence, dest_root
         ) in sorted(findings_by_key.items())
     ]
+
+    # Ranking runs over the full collected aggregate, then display
+    # truncates — display truncation can never masquerade as "strongest
+    # findings" (§8.4).
+    findings = rank_findings(findings, session_labels)
+    ranked_sessions = rank_sessions(findings, session_labels)
+    findings_omitted = max(0, len(findings) - MAX_DISPLAY_FINDINGS)
+    findings = findings[:MAX_DISPLAY_FINDINGS]
 
     agg.update({
         "sessions": len(included_sessions),
@@ -653,13 +729,62 @@ def scan(
         "unknown_root_writes": unknown_root_writes,
         "outside_cwd_secondary": outside_cwd_secondary,
         "same_project_writes": same_project_writes,
-        "sessions_with_findings": sorted({f.session_id for f in findings}),
+        "sessions_with_findings": ranked_sessions,
         "findings": findings,
-        # Display truncation is the renderer's concern (§8.4): ranking runs
-        # over the full collected aggregate, then display truncates.
-        "findings_omitted": 0,
+        "findings_omitted": findings_omitted,
         "targets_omitted": targets_omitted,
         "scan_seconds": time.monotonic() - t0,
         "since": since,
+        # Private renderer metadata, not part of the §3.2 public contract:
+        # carried so the renderer can abbreviate paths for display without
+        # reading the environment (renderers are contractually pure). The
+        # leading underscore marks it private and `json_payload` never
+        # emits it.
+        "_home": home_str,
     })
     return agg
+
+
+# The §3.2 aggregate — the public `--json` contract, in plan order. Private
+# renderer metadata (anything underscore-prefixed) is deliberately absent:
+# an implementation detail must not become public API.
+PUBLIC_FIELDS = (
+    "files_scanned", "files_unreadable",
+    "lines_total", "lines_malformed", "lines_oversize",
+    "records_undated", "records_excluded_by_window",
+    "sessions", "sessions_with_tools",
+    "sessions_with_declaration_activity",
+    "period_start", "period_end",
+    "tool_calls", "file_ops", "shell_calls",
+    "by_session",
+    "unknown_targets", "unsupported_path_forms",
+    "session_labels",
+    "suppressed", "unknown_root_writes",
+    "outside_cwd_secondary", "same_project_writes",
+    "sessions_with_findings", "findings",
+    "findings_omitted", "targets_omitted",
+    "scan_seconds", "since",
+)
+
+
+def json_payload(result: dict) -> dict:
+    """The §3.2 aggregate as JSON-serializable data (``--json``).
+
+    Emits exactly the §3.2 public fields — never private renderer
+    metadata. Sets and tuples become sorted lists and objects; field names
+    say what they are: ``op_count`` counts *recorded operations* (§7.2).
+    """
+    payload = {}
+    for key in PUBLIC_FIELDS:
+        if key not in result:
+            continue
+        value = result[key]
+        if key == "findings":
+            payload[key] = [finding._asdict() for finding in value]
+        elif isinstance(value, (set, frozenset)):
+            payload[key] = sorted(value)
+        elif isinstance(value, tuple):
+            payload[key] = list(value)
+        else:
+            payload[key] = value
+    return payload

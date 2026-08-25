@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 
 from sentience_governor import retro
+from sentience_governor.analyze.renderers import render_scan
 from sentience_governor.retro import (
     RootResolver,
     interpret_target,
@@ -922,3 +923,422 @@ def test_suppression_and_config_lists_are_narrow(config_root, home):
     # S5 needs the claude- prefix.
     assert suppression_rule("/tmp/other/x", root, hm) is None
     assert suppression_rule("/tmp/claude-1/x", root, hm) == "S5"
+
+
+# ---------------------------------------------------------------------------
+# CP3 — labels and language (§7), three report states, ranking and caps (§8)
+# ---------------------------------------------------------------------------
+
+def flat(rendered: str) -> str:
+    """Whitespace-normalized render, for text the screen wraps."""
+    return " ".join(rendered.split())
+
+
+FORBIDDEN_WORDS = (
+    "violation", "drift", "unauthorized", "out of scope", "successfully wrote",
+)
+
+
+def cross_project_corpus(config_root, home, sessions):
+    """Build a corpus where each session writes into its own set of repos.
+
+    ``sessions`` maps session id -> list of (repo name, op count).
+    """
+    source = git_repo(home, "repo-src")
+    records = []
+    for session_id, destinations in sessions.items():
+        for name, ops in destinations:
+            dest = git_repo(home, name)
+            records.append(activity(
+                session_id, cwd=str(source),
+                tools=[write_block(dest / "f.txt")] * ops,
+            ))
+    return scan_records(config_root, records)
+
+
+def test_44_custom_title_label_survives_finite_window(config_root, home):
+    """Plan test 44: `custom-title` present (records are undated) — label =
+    customTitle, last observed wins, set even under a finite window."""
+    source = git_repo(home, "repo-a")
+    dest = git_repo(home, "repo-b")
+    result = scan_records(config_root, [
+        {"type": "custom-title", "customTitle": "First", "sessionId": "s"},
+        {"type": "custom-title", "customTitle": "Alpha work", "sessionId": "s"},
+        activity("s", cwd=str(source), tools=[write_block(dest / "f.txt")],
+                 timestamp="2026-08-24T12:00:00.000Z"),
+    ], since="7d", now=FIXED_NOW)
+    assert result["session_labels"]["s"]["source"] == "custom-title"
+    assert '"Alpha work"' in render_scan(result)
+
+
+def test_45_slug_label(config_root, home):
+    """Plan test 45: no title, `slug` present — label = slug."""
+    source = git_repo(home, "repo-a")
+    dest = git_repo(home, "repo-b")
+    result = scan_records(config_root, [
+        activity("s", cwd=str(source), slug="recover-archived-work",
+                 tools=[write_block(dest / "f.txt")]),
+    ])
+    assert result["session_labels"]["s"]["source"] == "slug"
+    assert '"recover-archived-work"' in render_scan(result)
+
+
+def test_46_session_id_fallback_looks_deliberate(config_root, home):
+    """Plan test 46: neither — shortened session ID, rendered deliberately.
+
+    The fallback renders bare rather than quoted, so it reads as an
+    identifier and never as a title the user chose (§7.3).
+    """
+    source = git_repo(home, "repo-a")
+    dest = git_repo(home, "repo-b")
+    result = scan_records(config_root, [
+        activity("489aab2f-0c52-41d0-9304-fbd6f9040ab7", cwd=str(source),
+                 tools=[write_block(dest / "f.txt")]),
+    ])
+    rendered = render_scan(result)
+    assert "489aab2f" in rendered
+    assert '"489aab2f' not in rendered
+    assert "489aab2f-0c52" not in rendered
+
+
+def test_47_prompt_text_appears_nowhere(config_root, home):
+    """Plan test 47: `last-prompt` records — `lastPrompt` text appears
+    NOWHERE in output or aggregate.
+
+    Reader's trust proposition is that it does not use prompt content; a
+    tool cannot say so while displaying a prompt as a label.
+    """
+    secret = "PROMPTSECRETdeletetheproductiondatabase"
+    source = git_repo(home, "repo-a")
+    dest = git_repo(home, "repo-b")
+    result = scan_records(config_root, [
+        {"type": "last-prompt", "sessionId": "s", "lastPrompt": secret,
+         "timestamp": "2026-08-24T12:00:00.000Z"},
+        activity("s", cwd=str(source), tools=[write_block(dest / "f.txt")],
+                 lastPrompt=secret),
+    ])
+    assert secret not in json.dumps(retro.json_payload(result))
+    assert secret not in render_scan(result)
+
+
+def test_48_declaration_activity_is_never_an_objective(config_root, home):
+    """Plan test 48: declaration activity in 1 of 3 sessions — "activity in
+    1 of 3"; never "had a runtime objective"."""
+    source = git_repo(home, "repo-a")
+    result = scan_records(config_root, [
+        activity("s1", cwd=str(source), tools=[
+            {"name": "mcp__sentience__declare_intent", "input": {}}]),
+        activity("s2", cwd=str(source), tools=[]),
+        activity("s3", cwd=str(source), tools=[]),
+    ])
+    rendered = render_scan(result)
+    assert "activity in 1 of 3" in flat(rendered)
+    assert "runtime objective" not in rendered
+
+
+@pytest.mark.parametrize("state", ["zero", "one", "many"])
+def test_49_forbidden_vocabulary_absent_from_every_state(config_root, home, state):
+    """Plan test 49: report text sweep — violation / drift / unauthorized /
+    out of scope / successfully wrote absent from all three states."""
+    if state == "zero":
+        result = scan_records(config_root, [
+            activity("s", cwd=str(git_repo(home, "repo-a")), tools=[])])
+    elif state == "one":
+        result = cross_project_corpus(config_root, home, {"s": [("repo-b", 2)]})
+    else:
+        result = cross_project_corpus(
+            config_root, home, {"s1": [("repo-b", 2)], "s2": [("repo-c", 1)]})
+    rendered = render_scan(result).lower()
+    for word in FORBIDDEN_WORDS:
+        assert word not in rendered
+
+
+def test_50_write_qualifier_present_when_findings_shown(config_root, home):
+    """Plan test 50: write-qualifier line — present in any state showing
+    write findings (attempt-grade language, §7.2)."""
+    qualifier = ("Counts are write operations Claude issued as recorded in\n"
+                 "its history. Reader does not verify completion.")
+    one = cross_project_corpus(config_root, home, {"s": [("repo-b", 2)]})
+    assert qualifier in render_scan(one)
+
+    many = cross_project_corpus(
+        config_root, home, {"s1": [("repo-b", 2)], "s2": [("repo-c", 1)]})
+    assert qualifier in render_scan(many)
+
+
+def test_51_state_zero_leads_with_what_was_found(config_root, home):
+    """Plan test 51: no sessions stand out — leads with "no reportable …
+    was found in the activity Reader could classify", never confinement
+    language, no "0 findings"."""
+    result = scan_records(config_root, [
+        activity("s", cwd=str(git_repo(home, "repo-a")), tools=[
+            {"name": "Bash", "input": {"command": "ls"}}]),
+    ])
+    rendered = render_scan(result)
+    assert result["sessions_with_findings"] == []
+    assert ("No reportable project-boundary write activity was found\n"
+            "in the activity Reader could classify.") in rendered
+    for banned in ("0 findings", "nothing to report", "stayed inside",
+                   "clean", "no issues"):
+        assert banned not in rendered
+    # A zero screen shows no write findings, so it carries no qualifier.
+    assert "Reader does not verify completion" not in rendered
+
+
+@pytest.mark.parametrize("state", ["zero", "one", "many"])
+def test_51b_fixed_elements_present_and_ordered(config_root, home, state):
+    """Plan test 51b: all three states — fixed elements present and ordered
+    per §8.2, with the canonical reviewer statement on every screen."""
+    if state == "zero":
+        result = scan_records(config_root, [
+            activity("s", cwd=str(git_repo(home, "repo-a")), tools=[])])
+    elif state == "one":
+        result = cross_project_corpus(config_root, home, {"s": [("repo-b", 2)]})
+    else:
+        result = cross_project_corpus(
+            config_root, home, {"s1": [("repo-b", 2)], "s2": [("repo-c", 1)]})
+    rendered = render_scan(result)
+
+    reviewer = ("Reader is a retrospective reviewer, not live governance.\n"
+                "It cannot establish what you intended or authorized, or\n"
+                "whether an action complied with policy.")
+    bridge = ("This review is an example of what retrospective history\n"
+              "can reveal. Sentience Governor goes further by evaluating\n"
+              "declared objective, scope, execution and policy while the\n"
+              "agent is running.")
+    footer = "  sentience init claude-code        govern the next session"
+
+    assert rendered.startswith("Sentience · Retrospective Review\n")
+    assert "· local · transcripts read-only" in rendered
+    assert reviewer in rendered
+    assert "Not evaluated" in rendered
+    assert "Reader does not inspect or use your prompt content." in rendered
+    assert bridge in rendered
+    assert rendered.rstrip("\n").endswith(footer)
+
+    # Ordering: reviewer statement → Not evaluated → bridge → footer, and
+    # the limitations never sit inside the aha paragraph.
+    assert (rendered.index(reviewer)
+            < rendered.index("Not evaluated")
+            < rendered.index(bridge)
+            < rendered.index(footer))
+    # The canonical statement appears exactly once — no shorthand substitute
+    # and no duplication.
+    assert rendered.count(reviewer) == 1
+
+
+def test_52_state_one_is_the_hero_screen(config_root, home):
+    """Plan test 52: exactly one session stands out (containing several
+    findings) — hero render selected by session count; surprising fact
+    first, then evidence, then limitations."""
+    source = git_repo(home, "repo-src")
+    dest = git_repo(home, "repo-b")
+    downloads = home / "Downloads"
+    downloads.mkdir()
+    result = scan_records(config_root, [
+        {"type": "custom-title", "customTitle": "Alpha work", "sessionId": "s"},
+        activity("s", cwd=str(source), tools=(
+            [write_block(dest / ("f%d.txt" % i)) for i in range(3)]
+            + [write_block(downloads / "z.txt")]
+            + [{"name": "Bash", "input": {"command": "ls"}}])),
+    ])
+    rendered = render_scan(result)
+    assert len(result["sessions_with_findings"]) == 1
+    assert len(result["findings"]) == 4      # several findings, one session
+
+    assert "One session stands out." in rendered
+    assert '"Alpha work"' in rendered
+    assert "working in  ~/repo-src" in rendered
+    assert "Claude targeted writes into another project:" in rendered
+    # Resolver-honest wording, never "outside any project".
+    assert ("and into 1 other location where Reader cannot\n"
+            "  identify a project today:") in rendered
+    assert "outside any project" not in rendered
+    # Hierarchy: the fact and its evidence precede the limitations.
+    assert (rendered.index("One session stands out.")
+            < rendered.index("~/repo-b")
+            < rendered.index("Not evaluated"))
+    assert "1 shell commands in this session" in rendered
+
+
+def test_53_state_n_rows_and_session_ordering(config_root, home):
+    """Plan test 53: multiple sessions stand out — numbered rows with label
+    + working-in + one-line summary, ordered by the §8.4 session ranking;
+    canonical reviewer statement under the list caption."""
+    result = cross_project_corpus(config_root, home, {
+        "s-small": [("repo-x", 1)],
+        "s-big": [("repo-y", 5), ("repo-z", 4)],
+    })
+    rendered = render_scan(result)
+    assert result["sessions_with_findings"] == ["s-big", "s-small"]
+    assert "2 sessions stand out." in rendered
+    assert "  1. s-big" in rendered
+    assert "  2. s-small" in rendered
+    assert "     targeted writes into 2 other projects" in rendered
+    assert "     targeted writes into 1 other project" in rendered
+    caption = "Showing the strongest retrospective findings first."
+    reviewer = "Reader is a retrospective reviewer, not live governance."
+    assert rendered.index(caption) < rendered.index(reviewer)
+    # No scores, severities or risk labels anywhere.
+    for banned in ("severity", "risk", "score", "confidence"):
+        assert banned not in rendered.lower()
+
+
+def test_54_ranking_precedence_by_class(config_root, home):
+    """Plan test 54: ranking precedence — claude_config sorts above
+    cross_project above non_project."""
+    source = git_repo(home, "repo-src")
+    dest = git_repo(home, "repo-b")
+    downloads = home / "Downloads"
+    downloads.mkdir()
+    result = scan_records(config_root, [
+        activity("s", cwd=str(source), tools=[
+            write_block(downloads / "z.txt"),
+            write_block(dest / "f.txt"),
+            write_block(config_root / "settings.json"),
+        ]),
+    ])
+    assert [f.finding_class for f in result["findings"]] == [
+        "claude_config", "cross_project", "non_project"]
+    rendered = render_scan(result)
+    assert (rendered.index("global configuration")
+            < rendered.index("~/repo-b")
+            < rendered.index("~/Downloads"))
+
+
+def test_55_deterministic_tie_break(config_root, home):
+    """Plan test 55: deterministic tie-break — equal counts give stable
+    label/target ordering across runs, for finding and session order."""
+    sessions = {"s-b": [("repo-q", 1)], "s-a": [("repo-p", 1)]}
+    first = cross_project_corpus(config_root, home, sessions)
+    order = [(f.session_id, f.target) for f in first["findings"]]
+    sessions_order = first["sessions_with_findings"]
+    assert sessions_order == ["s-a", "s-b"]      # label ascending
+
+    for _ in range(3):
+        shutil.rmtree(config_root / "projects")
+        (config_root / "projects").mkdir()
+        again = cross_project_corpus(config_root, home, sessions)
+        assert [(f.session_id, f.target) for f in again["findings"]] == order
+        assert again["sessions_with_findings"] == sessions_order
+
+
+def test_56_display_cap_ranks_before_truncating(config_root, home, monkeypatch):
+    """Plan test 56: display cap exceeded — ranking computed pre-truncation;
+    omitted counts stated. Display truncation can never masquerade as
+    "strongest findings"."""
+    monkeypatch.setattr(retro, "MAX_DISPLAY_FINDINGS", 3)
+    source = git_repo(home, "repo-src")
+    dest = git_repo(home, "repo-b")
+    downloads = home / "Downloads"
+    downloads.mkdir()
+    result = scan_records(config_root, [
+        activity("s", cwd=str(source), tools=(
+            [write_block(downloads / ("z%d.txt" % i)) for i in range(4)]
+            + [write_block(dest / "f.txt")]
+            + [write_block(config_root / "settings.json")])),
+    ])
+    assert len(result["findings"]) == 3
+    assert result["findings_omitted"] == 3
+    # The survivors are the strongest by class, not the first collected.
+    assert result["findings"][0].finding_class == "claude_config"
+    assert result["findings"][1].finding_class == "cross_project"
+    assert "3 findings not shown" in flat(render_scan(result))
+
+
+def test_57_collection_bound_overflow_is_reported(config_root, home, monkeypatch):
+    """Plan test 57: `MAX_TARGETS` overflow — `targets_omitted` set and
+    reported, with the honest qualifier that collection itself was bounded."""
+    monkeypatch.setattr(retro, "MAX_TARGETS", 2)
+    source = git_repo(home, "repo-src")
+    dest = git_repo(home, "repo-b")
+    result = scan_records(config_root, [
+        activity("s", cwd=str(source),
+                 tools=[write_block(dest / ("f%d.txt" % i)) for i in range(5)]),
+    ])
+    assert result["targets_omitted"] == 3
+    assert len(result["findings"]) == 2
+    assert ("3 targets beyond the collection bound were not ranked"
+            in flat(render_scan(result)))
+
+
+def test_58_json_serializes_the_aggregate(config_root, home):
+    """Plan test 58: `--json` — serializes the full §3.2 aggregate, with
+    sets and tuples as sorted lists and objects."""
+    result = cross_project_corpus(config_root, home, {"s": [("repo-b", 2)]})
+    payload = retro.json_payload(result)
+    round_tripped = json.loads(json.dumps(payload))
+
+    for field in ("files_scanned", "files_unreadable", "lines_total",
+                  "lines_malformed", "lines_oversize", "records_undated",
+                  "records_excluded_by_window", "sessions",
+                  "sessions_with_tools", "sessions_with_declaration_activity",
+                  "period_start", "period_end", "tool_calls", "file_ops",
+                  "shell_calls", "by_session", "unknown_targets",
+                  "unsupported_path_forms", "session_labels", "suppressed",
+                  "unknown_root_writes", "outside_cwd_secondary",
+                  "same_project_writes", "sessions_with_findings", "findings",
+                  "findings_omitted", "targets_omitted", "scan_seconds",
+                  "since"):
+        assert field in round_tripped, field
+
+    (finding,) = round_tripped["findings"]
+    assert finding["finding_class"] == "cross_project"
+    assert finding["op_count"] == 2          # counts recorded operations
+    assert set(finding) == set(retro.Finding._fields)
+
+    # The public contract is exactly §3.2: private renderer metadata (the
+    # `_home` prefix render_scan needs to abbreviate paths) must never leak
+    # into the JSON surface, and no key may be underscore-prefixed.
+    assert set(round_tripped) == set(retro.PUBLIC_FIELDS)
+    assert "_home" in result and "_home" not in round_tripped
+    assert "home" not in round_tripped
+    assert not [key for key in round_tripped if key.startswith("_")]
+
+
+def test_state_zero_shows_coverage_limits_when_degraded(config_root, home):
+    """Coverage limits render inside `Not evaluated`, never in the aha
+    paragraph (§8.1/§8.2)."""
+    d = transcript_dir(config_root)
+    write_records(d / "ok.jsonl", [
+        activity("s", cwd=str(git_repo(home, "repo-a")), tools=[])])
+    (d / "broken.jsonl").write_text("{{{ not json\n", encoding="utf-8")
+
+    result = scan(config_root)
+    rendered = render_scan(result)
+    assert "1 malformed records skipped" in flat(rendered)
+    assert rendered.index("Not evaluated") < rendered.index("malformed")
+
+
+def test_screen_skeleton_order_is_fixed(config_root, home):
+    """The locked screen skeleton (§8.2): header → sessions/range context
+    line → state content → reviewer statement → Not evaluated → bridge →
+    footer.
+
+    A rank-1 `claude_config` finding is "shown first" as the first element
+    of the state's main content — it never displaces the context line from
+    directly beneath the header.
+    """
+    source = git_repo(home, "repo-src")
+    dest = git_repo(home, "repo-b")
+    result = scan_records(config_root, [
+        activity("s", cwd=str(source), tools=[
+            write_block(config_root / "settings.json"),
+            write_block(dest / "f.txt"),
+        ]),
+    ])
+    rendered = render_scan(result)
+    lines = rendered.split("\n")
+
+    assert lines[0] == "Sentience · Retrospective Review"
+    assert lines[1] == ""
+    assert lines[2] == "1 Claude Code session reviewed"
+    assert lines[3].endswith("· local · transcripts read-only")
+
+    assert (rendered.index("· local · transcripts read-only")
+            < rendered.index("global configuration")
+            < rendered.index("One session stands out.")
+            < rendered.index("Reader is a retrospective reviewer")
+            < rendered.index("Not evaluated")
+            < rendered.index("This review is an example")
+            < rendered.index("sentience init claude-code"))
