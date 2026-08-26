@@ -5,6 +5,41 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.1] — 2026-08-25
+
+**Retrospective review of the Claude Code history you already have.**
+`sentience scan` reads the transcripts Claude Code keeps on your machine and
+reports which sessions recorded write activity outside the project they were
+working in — before you have declared an intent or instrumented anything. It
+is local, read-only, and needs no signup.
+
+### Added
+- **`sentience scan`** — reviews `~/.claude` transcripts (or
+  `$CLAUDE_CONFIG_DIR`) and reports sessions that stand out. `--since
+  7d|30d|all` narrows the window, filtering on each record's own timestamp
+  and never on file mtime; the default is `all`, because retrospective
+  discovery of the whole history is the point. `--json` emits the structured
+  aggregate. The scan performs **zero writes of any kind**: it reads
+  transcripts, touches nothing else, and on a fresh install renders its
+  result with no prompt and no network request.
+- **`/sentience-review`** — the same review inside Claude Code, installed by
+  `sentience init claude-code` alongside the existing skills. Like them it is
+  operator-invoked only and renders the CLI output verbatim.
+
+### Notes
+- **Reader is a retrospective reviewer, not live governance.** It reports what
+  the recorded history shows; it cannot establish what you intended or
+  authorized, or whether an action complied with policy. Counts are write
+  operations Claude issued as recorded in its history — completion is not
+  verified.
+- **Prompt content is never inspected**, and neither are tool results. Bash
+  commands are counted, never interpreted, and every report says so.
+- Where a destination cannot be attributed to a project today — a directory
+  that is not a repository, or a repository since moved or deleted — the
+  report says exactly that rather than asserting a project. A `.git` file
+  (git worktrees, submodules) is treated as ambiguous and never establishes a
+  cross-project claim.
+
 ## [0.3.0.4] — 2026-08-25
 
 **Patch release.** Restarting Claude Code left an empty session in your trace

@@ -6,6 +6,29 @@ Breaking changes bump the minor version until 1.0. After 1.0, breaking changes b
 
 ---
 
+## 0.3.1 — 2026-08-25
+
+**Review the Claude Code history you already have.** `sentience scan` reads the
+transcripts Claude Code keeps on your machine and reports which sessions
+recorded write activity outside the project they were working in — before you
+have declared an intent or instrumented anything. Local, read-only, no signup;
+the scan performs zero writes of any kind.
+
+`--since 7d|30d|all` narrows the window (default `all`, filtered on each
+record's own timestamp, never file mtime) and `--json` emits the structured
+aggregate. `sentience init claude-code` also installs `/sentience-review`, the
+same review inside Claude Code.
+
+Reader is a retrospective reviewer, not live governance: it reports what the
+recorded history shows, and cannot establish what you intended or authorized,
+or whether an action complied with policy. Counts are write operations Claude
+issued as recorded in its history; completion is not verified. Prompt content
+and tool results are never inspected, and Bash commands are counted rather
+than interpreted. Where a destination cannot be attributed to a project today,
+the report says so rather than asserting one.
+
+---
+
 ## 0.3.0.4 — 2026-08-25
 
 **Restarting Claude Code no longer leaves an empty session behind.** When

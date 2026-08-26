@@ -2707,6 +2707,7 @@ def _print_command_guide() -> int:
     print("Sentience Governor — local governance for agent sessions.")
     print()
     print("Commands:")
+    print("  sentience scan              Review your existing Claude Code history.")
     print("  sentience status            Check the hook is capturing sessions.")
     print("  sentience list              List captured sessions, newest first.")
     print("  sentience open <id>         Render one session (Summary / Key Events / Trace).")
@@ -2722,6 +2723,54 @@ def _print_command_guide() -> int:
     print()
     print("Run any command with -h for details (e.g. `sentience analyze -h`).")
     return 0
+
+
+def run_scan(args: argparse.Namespace) -> int:
+    """`sentience scan` handler — the retrospective Reader (v0.3.1).
+
+    Reader is a retrospective GTM/discovery surface, not runtime
+    governance: it reads Claude Code's own history, which another system
+    owns, and reports only what that evidence supports. It emits no
+    GovernanceEvent, writes no trace, and mutates nothing.
+
+    **The scan path performs zero writes of any kind.** `main()` bypasses
+    both the first-run flow and the v0.3.0.3 convergence seam for this
+    handler (see main()), so "local, transcripts read-only" carries no
+    asterisk at the exact moment the product is asking to be trusted.
+    """
+    from sentience_governor import retro
+    from sentience_governor.analyze.renderers import render_scan
+
+    result = retro.scan(since=getattr(args, "since", "all"))
+
+    if getattr(args, "json", False):
+        print(json.dumps(retro.json_payload(result), indent=2, sort_keys=False))
+        return 0
+
+    print(render_scan(result))
+    return 0
+
+
+def _bypasses_first_run(func) -> bool:
+    """Whether the dispatched handler skips the interactive first-run flow.
+
+    v0.3.1: `scan` is the cold-start GTM surface — on a fresh install the
+    very first run must render its result with no email prompt and no
+    outbound request. Identity comparison, never string matching.
+    """
+    return func is run_scan
+
+
+def _bypasses_seam(func) -> bool:
+    """Whether the dispatched handler skips the v0.3.0.3 convergence seam.
+
+    `init claude-code` converges its own explicit target. `scan` is
+    excluded because the Reader path performs zero writes of any kind
+    (v0.3.1 §10.2): the seam can write `.claude/settings.local.json` in a
+    project carrying Sentience evidence, and the trust statement should
+    not need the qualification.
+    """
+    return func is run_init_claude_code or func is run_scan
 
 
 def main() -> int:
@@ -3153,6 +3202,37 @@ def main() -> int:
     # `sentience demo ...` — packaged runnable demos (F-V6). Importable
     # from any install, so no Python-path knowledge needed.
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # `sentience scan` — v0.3.1 retrospective session reader.
+    # The CLI name is implementation plumbing; the product surface is
+    # "Sentience · Retrospective Review" (and `/sentience-review` in
+    # Claude Code). This is the true pre-instrumentation cold-start
+    # path: the command a stranger runs before adopting anything.
+    # ------------------------------------------------------------------
+    p_scan = subparsers.add_parser(
+        "scan",
+        help=(
+            "Review your existing Claude Code history for project-boundary "
+            "write activity. Local, read-only, no signup."
+        ),
+    )
+    p_scan.add_argument(
+        "--since",
+        choices=["7d", "30d", "all"],
+        default="all",
+        help=(
+            "Window to review, filtered on each record's own timestamp "
+            "(never file mtime). Default: all — retrospective discovery of "
+            "the whole history is the point; 7d/30d narrow it."
+        ),
+    )
+    p_scan.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit the structured aggregate instead of the report.",
+    )
+    p_scan.set_defaults(func=run_scan)
+
     p_demo = subparsers.add_parser(
         "demo",
         help="Run a packaged demo session through the analyzer.",
@@ -3177,7 +3257,13 @@ def main() -> int:
     # if state already exists, if SENTIENCE_NO_FIRST_RUN_PROMPT is
     # set, or if any error occurs (defensive — never blocks a real
     # command). See sentience_governor/cli/first_run.py.
-    maybe_run_first_run_flow(package_version=_resolve_package_version())
+    # v0.3.1 — the Reader path is zero-write, and that includes the
+    # first-run flow: on a fresh install the very first `sentience scan`
+    # renders its result with no email prompt and no outbound request.
+    # Identity comparison, matching the seam's `init claude-code`
+    # exception style below.
+    if not _bypasses_first_run(getattr(args, "func", None)):
+        maybe_run_first_run_flow(package_version=_resolve_package_version())
 
     # F-V2: no subcommand given → print the guide (first-run flow has
     # already fired above, so a brand-new operator sees the welcome
@@ -3191,7 +3277,13 @@ def main() -> int:
     # flow above (interactive), then convergence, then dispatch. Fail-open:
     # run_seam_convergence never raises, and it never configures a project
     # that carries no Sentience evidence.
-    if args.func is not run_init_claude_code:
+    # v0.3.1 adds `scan` to the exception list: the seam can write
+    # `.claude/settings.local.json` in a project carrying Sentience
+    # evidence, and the Reader's trust posture is strongest as an
+    # absolute — zero writes of any kind on the scan path. Cost: running
+    # `scan` forgoes one opportunistic hook repair; any other command,
+    # and the next session, still converge.
+    if not _bypasses_seam(args.func):
         from sentience_governor.cli.hook_config import run_seam_convergence
 
         run_seam_convergence()
