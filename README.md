@@ -27,11 +27,13 @@ For real output, see [See it work](#see-it-work) below.*
 
 ## What's new
 
-**0.3.0.4** stops a Claude Code restart from leaving an empty session in your
-trace directory and taking over `sentience status` as your last session. Empty
-sessions are no longer created, `status` reports your newest session with
-recorded activity, and any already on disk stay listed and labelled. Full
-detail in the [changelog](CHANGELOG.md).
+**0.3.1** adds `sentience scan` — a retrospective review of the Claude Code
+history already on your machine. It reports which sessions recorded write
+activity outside the project they were working in, before you have declared an
+intent or instrumented anything. Local and read-only: no signup, no network
+request, and no writes of any kind. The same review is available inside Claude
+Code as `/sentience-review`. Full detail in the
+[changelog](https://github.com/crescerelabs/sentience-governor/blob/main/CHANGELOG.md).
 
 ---
 

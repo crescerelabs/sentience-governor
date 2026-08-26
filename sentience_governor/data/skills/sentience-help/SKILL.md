@@ -15,6 +15,7 @@ disable-model-invocation: true
 - `/sentience-profile` — what governance rules are active?
 - `/sentience-violations` — per-rule policy-violation drill-down
 - `/sentience-intent` — per-turn intent-drift drill-down
+- `/sentience-review` — retrospective review of your existing Claude Code history
 
 ## What you can't do (and where it lives instead)
 

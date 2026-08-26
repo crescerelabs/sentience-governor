@@ -2707,6 +2707,7 @@ def _print_command_guide() -> int:
     print("Sentience Governor — local governance for agent sessions.")
     print()
     print("Commands:")
+    print("  sentience scan              Review your existing Claude Code history.")
     print("  sentience status            Check the hook is capturing sessions.")
     print("  sentience list              List captured sessions, newest first.")
     print("  sentience open <id>         Render one session (Summary / Key Events / Trace).")

@@ -19,7 +19,7 @@ sentience list
 
 ## Inside Claude Code (slash commands)
 
-New in 0.2.8: `sentience init claude-code` installs six Claude Code skills, exposed as `/sentience-*` slash commands — read governance signals without leaving the chat.
+New in 0.2.8: `sentience init claude-code` installs seven Claude Code skills, exposed as `/sentience-*` slash commands — read governance signals without leaving the chat.
 
 | Command | What it shows |
 | :-- | :-- |
@@ -29,6 +29,7 @@ New in 0.2.8: `sentience init claude-code` installs six Claude Code skills, expo
 | `/sentience-profile` | The active governance profile (view-only) |
 | `/sentience-violations` | Per-rule policy-violation drill-down |
 | `/sentience-intent` | Per-turn intent-drift drill-down |
+| `/sentience-review` | Retrospective review of your existing Claude Code history (new in 0.3.1) |
 
 Each command is a thin wrapper over the matching `sentience` CLI command below: the CLI produces the deterministic numbers at preprocessing time, and Claude renders them inline and is instructed to show them verbatim. Anything Claude adds beyond the rendered report is interpretation, not Sentience measurement.
 
@@ -53,6 +54,40 @@ Four CLI entry points registered by `pip install sentience-governor`.
 Curated viewer for agent-hook session traces.
 
 **First run:** the first time you invoke `sentience` after install, you'll see a one-time prompt asking if you want to know when the hosted console ships. Drop your email or hit Enter to skip — it never asks again. Optional. Drop email at [getsentience.ai/launch-list](https://getsentience.ai/launch-list/) any time.
+
+### `sentience scan`
+
+Reviews the Claude Code history already on your machine and reports which sessions recorded write activity outside the project they were working in. Local and read-only — it needs no signup, makes no network request, and performs **zero writes of any kind**, including on a fresh install.
+
+```bash
+$ sentience scan
+Sentience · Retrospective Review
+
+9 Claude Code sessions reviewed
+Apr 14 → Aug 25 · local · transcripts read-only
+
+One session stands out.
+
+  "Sentience-Governor-build"
+   working in  ~/sentience-gov-build
+
+  Claude targeted writes into another project:
+
+    ~/sentience-governor          67 ops
+
+Counts are write operations Claude issued as recorded in
+its history. Reader does not verify completion.
+
+Reader is a retrospective reviewer, not live governance.
+It cannot establish what you intended or authorized, or
+whether an action complied with policy.
+```
+
+`--since 7d|30d|all` narrows the window, filtering on each record's own timestamp and never on file mtime; the default is `all`. `--json` emits the structured aggregate.
+
+Transcripts are read from `~/.claude` (or `$CLAUDE_CONFIG_DIR`). Prompt content and tool results are never inspected; Bash commands are counted, never interpreted. Where a destination cannot be attributed to a project today — a directory that is not a repository, or one since moved or deleted — the report says exactly that rather than asserting a project.
+
+The same review is available inside Claude Code as [`/sentience-review`](#inside-claude-code-slash-commands) once `sentience init claude-code` has run.
 
 ### `sentience status`
 
