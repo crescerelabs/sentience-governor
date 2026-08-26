@@ -68,12 +68,12 @@ Apr 14 → Aug 25 · local · transcripts read-only
 
 One session stands out.
 
-  "Sentience-Governor-build"
-   working in  ~/sentience-gov-build
+  "api-service refactor"
+   working in  ~/api-service
 
   Claude targeted writes into another project:
 
-    ~/sentience-governor          67 ops
+    ~/shared-client               67 ops
 
 Counts are write operations Claude issued as recorded in
 its history. Reader does not verify completion.

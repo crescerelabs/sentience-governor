@@ -435,7 +435,7 @@ def test_16_windows_style_paths_are_unknown_and_counted(config_root):
     """Plan test 16: Windows-style path — unknown, counted, never a
     finding."""
     assert interpret_target("C:\\Users\\x\\f.txt", "/h") == (None, "windows")
-    assert interpret_target("C:/Users/x/f.txt", "/h") == (None, "windows")
+    assert interpret_target("C:/work/x/f.txt", "/h") == (None, "windows")
     assert interpret_target("a\\b", "/h") == (None, "windows")
 
     install_fixtures(config_root, "second_file.jsonl")
