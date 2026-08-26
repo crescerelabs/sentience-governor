@@ -21,6 +21,7 @@ import pytest
 from sentience_governor.cli.ux import (
     _BASELINE_FREQUENCY_THRESHOLD,
     _EventAnomaly,
+    _is_transient_bootstrap,
     _format_anomaly_action,
     _format_event_oneline,
     _format_tool_action,
@@ -885,3 +886,383 @@ class TestF18TokenBearingHint:
         assert code == 0
         assert "No usable analyzer signal" in out
         assert "Showing the most recent session that does" not in out
+
+
+# ---------------------------------------------------------------------------
+# v0.3.0.4 — transient-bootstrap (ghost) sessions.
+#
+# A Claude Code app restart fires SessionEnd for a transient session that
+# never did anything, leaving a two-event trace. v0.3.0.4 stops creating
+# them (producer side, tests in test_claude_code_session_end.py) and makes
+# the CLI resilient to the ones already on disk (below).
+# ---------------------------------------------------------------------------
+
+
+def _ts(minute: int) -> str:
+    """Distinct first-event timestamps drive `_list_session_files` ordering
+    deterministically — no sleeps, no mtime races."""
+    return f"2026-04-20T10:{minute:02d}:00.000Z"
+
+
+def _ghost_events(sid: str, minute: int = 30) -> List[dict]:
+    """The verbatim production ghost signature: AGENT_REGISTERED followed by
+    INTENT_DECLARED with intent_source 'none' and a null stated_objective."""
+    reg = _agent_registered(1, session_id=sid)
+    reg["timestamp_utc"] = _ts(minute)
+    intent = _intent_declared(2, session_id=sid)
+    intent["timestamp_utc"] = _ts(minute)
+    intent["payload"]["stated_objective"] = None
+    intent["payload"]["session_scope_hint"] = []
+    return [reg, intent]
+
+
+def _intent_only_events(
+    sid: str, source: str, objective: str, minute: int = 30
+) -> List[dict]:
+    """REG + a REAL declared intent, and nothing else — the session shape
+    that must never be classified transient (a genuine objective exists;
+    no tool call has happened yet)."""
+    reg = _agent_registered(1, session_id=sid)
+    reg["timestamp_utc"] = _ts(minute)
+    intent = _intent_declared(2, session_id=sid, source=source)
+    intent["timestamp_utc"] = _ts(minute)
+    intent["payload"]["stated_objective"] = objective
+    intent["payload"]["session_scope_hint"] = ["filesystem"]
+    return [reg, intent]
+
+
+def _real_events(sid: str, minute: int = 10) -> List[dict]:
+    """An ordinary session with recorded activity."""
+    reg = _agent_registered(1, session_id=sid)
+    reg["timestamp_utc"] = _ts(minute)
+    return [
+        reg,
+        _intent_declared(2, session_id=sid),
+        _scope_asserted(3, "Read", session_id=sid),
+        _context_snapshot(4, session_id=sid),
+    ]
+
+
+class TestTransientBootstrapClassifier:
+    """§7 of the frozen plan — the classifier is deliberately narrow: it
+    identifies the confirmed empty-bootstrap artifact and nothing else."""
+
+    def test_c1_exact_ghost_signature_is_transient(self):
+        assert _is_transient_bootstrap(_ghost_events("sess-ghost")) is True
+
+    def test_c1b_absent_stated_objective_key_is_transient(self):
+        # Older traces may omit the key entirely rather than carrying null.
+        events = _ghost_events("sess-ghost")
+        del events[1]["payload"]["stated_objective"]
+        assert _is_transient_bootstrap(events) is True
+
+    def test_c2_null_intent_plus_activity_is_not_transient(self):
+        events = _ghost_events("sess-x") + [
+            _scope_asserted(3, "Read", session_id="sess-x")
+        ]
+        assert _is_transient_bootstrap(events) is False
+
+    def test_c3_explicit_intent_only_is_not_transient(self):
+        """CRITICAL REGRESSION: a session carrying a genuine explicit
+        objective must never be hidden merely because no tool call has
+        happened yet."""
+        events = _intent_only_events(
+            "sess-explicit", "explicit", "ship the ghost fix"
+        )
+        assert _is_transient_bootstrap(events) is False
+
+    def test_c3_explicit_intent_only_can_be_last_session(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        trace_dir = tmp_path / "tr"
+        trace_dir.mkdir()
+        _write_trace(
+            trace_dir / "sess-explicit.jsonl",
+            _intent_only_events(
+                "sess-explicit", "explicit", "ship the ghost fix", minute=40
+            ),
+        )
+        _write_trace(
+            trace_dir / "sess-old.jsonl", _real_events("sess-old", minute=5)
+        )
+        monkeypatch.setenv("SENTIENCE_CLAUDE_CODE_SINK_PATH", str(trace_dir))
+
+        assert run_status(argparse_ns()) == 0
+        out = capsys.readouterr().out
+        assert "sess-explicit" in out
+        assert "transient" not in out
+
+        assert run_status(argparse_ns(json=True)) == 0
+        data = json.loads(capsys.readouterr().out)
+        assert data["last_session"]["id"] == "sess-explicit"
+        assert "transient" not in data["last_session"]
+        assert data["transient_sessions"] == {"skipped": 0, "ids": []}
+
+    def test_c3b_inferred_intent_only_is_not_transient(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        events = _intent_only_events(
+            "sess-inferred", "inferred", "investigate the trace", minute=40
+        )
+        assert _is_transient_bootstrap(events) is False
+
+        trace_dir = tmp_path / "tr"
+        trace_dir.mkdir()
+        _write_trace(trace_dir / "sess-inferred.jsonl", events)
+        _write_trace(
+            trace_dir / "sess-old.jsonl", _real_events("sess-old", minute=5)
+        )
+        monkeypatch.setenv("SENTIENCE_CLAUDE_CODE_SINK_PATH", str(trace_dir))
+        assert run_status(argparse_ns(json=True)) == 0
+        data = json.loads(capsys.readouterr().out)
+        assert data["last_session"]["id"] == "sess-inferred"
+
+    def test_c4_declaration_appended_later_is_not_transient(self):
+        # REG + null INTENT + a later server-written declaration (3 events).
+        events = _ghost_events("sess-declared")
+        later = _intent_declared(3, session_id="sess-declared", source="inferred")
+        later["payload"]["stated_objective"] = "declared mid-session"
+        assert _is_transient_bootstrap(events + [later]) is False
+
+    def test_c5_empty_single_and_malformed_are_not_transient(self):
+        assert _is_transient_bootstrap([]) is False
+        assert _is_transient_bootstrap(
+            [_agent_registered(1, session_id="sess-one")]
+        ) is False
+        # Right length, wrong event types.
+        assert _is_transient_bootstrap(
+            [
+                _scope_asserted(1, "Read", session_id="sess-b"),
+                _context_snapshot(2, session_id="sess-b"),
+            ]
+        ) is False
+        # Right shape, payload not a dict / missing fields.
+        broken = _ghost_events("sess-broken")
+        broken[1]["payload"] = None
+        assert _is_transient_bootstrap(broken) is False
+        assert _is_transient_bootstrap(["not-a-dict", "also-not"]) is False
+
+
+class TestStatusSkipsTransientSessions:
+    """`sentience status` must never let a ghost displace the operator's
+    real latest session. The scan is exhaustive — no cap, no heuristic."""
+
+    def _dir(self, tmp_path, monkeypatch) -> Path:
+        trace_dir = tmp_path / "tr"
+        trace_dir.mkdir()
+        monkeypatch.setenv("SENTIENCE_CLAUDE_CODE_SINK_PATH", str(trace_dir))
+        return trace_dir
+
+    def test_s1_newer_ghost_does_not_displace_real_session(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        d = self._dir(tmp_path, monkeypatch)
+        _write_trace(d / "sess-ghost.jsonl", _ghost_events("sess-ghost", 30))
+        _write_trace(d / "sess-real.jsonl", _real_events("sess-real", 10))
+
+        assert run_status(argparse_ns()) == 0
+        out = capsys.readouterr().out
+        assert "ID:                 sess-real" in out
+        assert "Note: skipped 1 transient session(s)" in out
+
+        assert run_status(argparse_ns(json=True)) == 0
+        data = json.loads(capsys.readouterr().out)
+        assert data["last_session"]["id"] == "sess-real"
+        assert data["transient_sessions"] == {
+            "skipped": 1,
+            "ids": ["sess-ghost"],
+        }
+
+    def test_s2_multiple_ghosts_then_real(self, tmp_path, monkeypatch, capsys):
+        d = self._dir(tmp_path, monkeypatch)
+        _write_trace(d / "ghost-b.jsonl", _ghost_events("ghost-b", 31))
+        _write_trace(d / "ghost-a.jsonl", _ghost_events("ghost-a", 30))
+        _write_trace(d / "sess-real.jsonl", _real_events("sess-real", 10))
+
+        assert run_status(argparse_ns(json=True)) == 0
+        data = json.loads(capsys.readouterr().out)
+        assert data["last_session"]["id"] == "sess-real"
+        assert data["transient_sessions"]["skipped"] == 2
+        # Newest-first, and the displayed session is never in ids.
+        assert data["transient_sessions"]["ids"] == ["ghost-b", "ghost-a"]
+
+    def test_s3_all_transient_single(self, tmp_path, monkeypatch, capsys):
+        d = self._dir(tmp_path, monkeypatch)
+        _write_trace(d / "only-ghost.jsonl", _ghost_events("only-ghost", 30))
+
+        assert run_status(argparse_ns()) == 0
+        out = capsys.readouterr().out
+        assert "Last session (transient — no recorded activity):" in out
+        assert "ID:                 only-ghost" in out
+        assert "Note: skipped" not in out          # nothing was passed over
+
+        assert run_status(argparse_ns(json=True)) == 0
+        data = json.loads(capsys.readouterr().out)
+        assert data["last_session"]["id"] == "only-ghost"
+        assert data["last_session"]["transient"] is True
+        assert data["transient_sessions"] == {"skipped": 0, "ids": []}
+
+    def test_s3_all_transient_multiple(self, tmp_path, monkeypatch, capsys):
+        d = self._dir(tmp_path, monkeypatch)
+        for name, minute in [("g-c", 32), ("g-b", 31), ("g-a", 30)]:
+            _write_trace(d / f"{name}.jsonl", _ghost_events(name, minute))
+
+        assert run_status(argparse_ns()) == 0
+        out = capsys.readouterr().out
+        assert "Last session (transient — no recorded activity):" in out
+        assert "ID:                 g-c" in out
+        assert "Note: skipped 2 transient session(s)" in out
+
+        assert run_status(argparse_ns(json=True)) == 0
+        data = json.loads(capsys.readouterr().out)
+        # Newest displayed with transient:true; the OTHER N-1 are skipped,
+        # and the displayed id never appears in ids.
+        assert data["last_session"]["id"] == "g-c"
+        assert data["last_session"]["transient"] is True
+        assert data["transient_sessions"]["skipped"] == 2
+        assert data["transient_sessions"]["ids"] == ["g-b", "g-a"]
+        assert "g-c" not in data["transient_sessions"]["ids"]
+
+    def test_s4_no_ghosts_behaviour_unchanged_plus_additive_key(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        d = self._dir(tmp_path, monkeypatch)
+        _write_trace(d / "sess-real.jsonl", _real_events("sess-real", 10))
+
+        assert run_status(argparse_ns()) == 0
+        out = capsys.readouterr().out
+        assert "Last session:" in out
+        assert "transient" not in out
+
+        assert run_status(argparse_ns(json=True)) == 0
+        data = json.loads(capsys.readouterr().out)
+        assert data["last_session"]["id"] == "sess-real"
+        assert "transient" not in data["last_session"]
+        assert data["transient_sessions"] == {"skipped": 0, "ids": []}
+
+    def test_s5_thirty_ghosts_do_not_hide_the_real_session(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """No probe cap: a correctness cutoff would recreate the original
+        defect once enough legacy ghosts accumulated."""
+        d = self._dir(tmp_path, monkeypatch)
+        for i in range(30):
+            sid = f"ghost-{i:02d}"
+            _write_trace(d / f"{sid}.jsonl", _ghost_events(sid, 20 + i))
+        _write_trace(d / "sess-real.jsonl", _real_events("sess-real", 5))
+
+        assert run_status(argparse_ns(json=True)) == 0
+        data = json.loads(capsys.readouterr().out)
+        assert data["last_session"]["id"] == "sess-real"
+        assert data["transient_sessions"]["skipped"] == 30
+        assert len(data["transient_sessions"]["ids"]) == 30
+        assert "sess-real" not in data["transient_sessions"]["ids"]
+
+    def test_s6_classification_is_exhaustive_regardless_of_file_size(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """Classification depends only on §7 event structure. A large ghost
+        file is still a ghost: any size-based shortcut would misclassify it
+        and let it displace the real session again."""
+        d = self._dir(tmp_path, monkeypatch)
+        fat = _ghost_events("fat-ghost", 30)
+        fat[1]["payload"]["authorization_claim"] = "x" * 20000  # > 8 KiB file
+        _write_trace(d / "fat-ghost.jsonl", fat)
+        _write_trace(d / "sess-real.jsonl", _real_events("sess-real", 10))
+        assert (d / "fat-ghost.jsonl").stat().st_size > 8192
+
+        assert _is_transient_bootstrap(fat) is True
+        assert run_status(argparse_ns(json=True)) == 0
+        data = json.loads(capsys.readouterr().out)
+        assert data["last_session"]["id"] == "sess-real"
+        assert data["transient_sessions"]["ids"] == ["fat-ghost"]
+
+
+class TestListLabelsTransientSessions:
+    def test_l1_ghost_retained_but_labelled(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        trace_dir = tmp_path / "tr"
+        trace_dir.mkdir()
+        _write_trace(
+            trace_dir / "sess-ghost.jsonl", _ghost_events("sess-ghost", 30)
+        )
+        _write_trace(
+            trace_dir / "sess-real.jsonl", _real_events("sess-real", 10)
+        )
+        monkeypatch.setenv("SENTIENCE_CLAUDE_CODE_SINK_PATH", str(trace_dir))
+        assert run_list(argparse_ns()) == 0
+        out = capsys.readouterr().out
+        # Still visible (append-only transparency), labelled for what it is.
+        assert "sess-ghost" in out
+        ghost_line = [ln for ln in out.splitlines() if "sess-ghost" in ln][0]
+        assert "transient — no activity" in ghost_line
+        assert "0v/0a" not in ghost_line
+        # The real session keeps the ordinary verdict cell.
+        real_line = [ln for ln in out.splitlines() if "sess-real" in ln][0]
+        assert "transient" not in real_line
+        assert "0v/0a" in real_line
+
+    def test_l2_intent_only_session_is_not_labelled(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        trace_dir = tmp_path / "tr"
+        trace_dir.mkdir()
+        _write_trace(
+            trace_dir / "sess-explicit.jsonl",
+            _intent_only_events(
+                "sess-explicit", "explicit", "ship the ghost fix"
+            ),
+        )
+        monkeypatch.setenv("SENTIENCE_CLAUDE_CODE_SINK_PATH", str(trace_dir))
+        assert run_list(argparse_ns()) == 0
+        out = capsys.readouterr().out
+        # `list` shows a 12-char id prefix.
+        assert "sess-explici" in out
+        assert "transient" not in out
+        assert "0v/0a" in out
+
+
+class TestPulseTransientWording:
+    def _rich(self, sid: str, minute: int = 10) -> List[dict]:
+        reg = _agent_registered(1, session_id=sid)
+        reg["timestamp_utc"] = _ts(minute)
+        return [
+            reg,
+            _intent_declared(2, session_id=sid),
+            _scope_asserted(3, "Read", session_id=sid),
+            _ctx_with_turn(4, sid, "turn-1"),
+            _ctx_with_turn(5, sid, "turn-2"),
+        ]
+
+    def test_f1_fallback_mentions_transient_possibility(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        _write_trace(tmp_path / "sess-rich.jsonl", self._rich("sess-rich", 10))
+        _write_trace(
+            tmp_path / "sess-ghost.jsonl", _ghost_events("sess-ghost", 30)
+        )
+        monkeypatch.setenv("SENTIENCE_CLAUDE_CODE_SINK_PATH", str(tmp_path))
+        assert run_pulse(argparse_ns(latest=True, no_prompt=True)) == 0
+        out = capsys.readouterr().out
+        # Selection logic unchanged: still falls back to the token-bearing
+        # session; only the explanatory wording gained the transient case.
+        assert "Showing the most recent session that does — sess-rich" in out
+        assert "or was a transient session" in out
+
+    def test_f2_json_shape_unchanged_with_ghost_newest(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        _write_trace(tmp_path / "sess-rich.jsonl", self._rich("sess-rich", 10))
+        _write_trace(
+            tmp_path / "sess-ghost.jsonl", _ghost_events("sess-ghost", 30)
+        )
+        monkeypatch.setenv("SENTIENCE_CLAUDE_CODE_SINK_PATH", str(tmp_path))
+        assert run_pulse(
+            argparse_ns(latest=True, no_prompt=True, json=True)
+        ) == 0
+        out = capsys.readouterr().out
+        data = json.loads(out)                    # valid JSON, not human text
+        assert "status" in data
+        assert "or was a transient session" not in out
+        assert "Showing the most recent session" not in out

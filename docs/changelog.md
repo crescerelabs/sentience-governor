@@ -6,6 +6,35 @@ Breaking changes bump the minor version until 1.0. After 1.0, breaking changes b
 
 ---
 
+## 0.3.0.4 — 2026-08-25
+
+**Restarting Claude Code no longer leaves an empty session behind.** When
+Claude Code restarts, it opens a session, closes it straight away, and tells
+Sentience that session ended. Sentience registered it before discovering there
+was nothing in it, so every restart wrote a two-event trace for a session that
+never ran a tool call. Because it was the newest trace on disk, `sentience
+status` then showed it as your last session, hiding the one you had actually
+been working in.
+
+Sentience now reads the session's transcript before writing anything, and
+creates nothing when there is positively nothing to record. Real sessions are
+untouched, including one whose only contact with Sentience is its end: if there
+are turns in the transcript, the full trace is written exactly as before. When
+the transcript cannot be read at all, Sentience keeps its earlier behaviour
+instead of assuming the session was empty, because a session that might be real
+should never be discarded on an I/O error.
+
+Empty sessions already on disk stay there. Nothing is deleted, rewritten or
+compacted. Instead the reporting commands learned to recognise them: `status`
+names your newest session with recorded activity and says how many empty ones
+it passed over (`--json` lists them under `transient_sessions`), and `list`
+still shows them, labelled `transient — no activity` rather than carrying a
+clean-verdict glyph that said nothing useful about a session that never acted.
+If every session on disk is empty, `status` shows the newest and labels it,
+rather than pretending there is nothing there.
+
+---
+
 ## 0.3.0.3 — 2026-08-24
 
 **Your hook configuration now keeps itself current.** Before this release,

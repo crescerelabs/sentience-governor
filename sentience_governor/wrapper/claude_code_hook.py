@@ -408,6 +408,34 @@ def _first_declared_intent(
 
 
 # ---------------------------------------------------------------------------
+# v0.3.0.4 — SessionEnd first-invocation gate (ghost-session fix)
+# ---------------------------------------------------------------------------
+
+# Verdicts for a SessionEnd arriving as the first-ever hook invocation for
+# its session id. Suppression requires POSITIVE establishment; uncertainty
+# must fall through to the pre-gate flow unchanged.
+_GATE_EMPTY = "empty"
+_GATE_EMITTABLE = "emittable"
+_GATE_UNCERTAIN = "uncertain"
+
+
+def _turn_is_emittable(turn: dict) -> bool:
+    """The single emittable-turn predicate, shared by the SessionEnd gate
+    and the token-batch emitter so the two can never drift: a turn matters
+    iff it carries populated tokens or issued at least one tool call (D7)."""
+    return bool(turn.get("tokens_populated")) or bool(turn.get("tool_use_ids"))
+
+
+def _parsed_has_emittable_turns(parsed: dict) -> bool:
+    turns = parsed.get("turns") or {}
+    return any(
+        _turn_is_emittable(turns[rid])
+        for rid in parsed.get("turn_order") or []
+        if rid in turns
+    )
+
+
+# ---------------------------------------------------------------------------
 # Core hook processor
 # ---------------------------------------------------------------------------
 
@@ -557,6 +585,27 @@ class ClaudeCodeGovernanceHook:
 
         sink_path = self._resolve_sink_path_for(ctx.session_id)
 
+        # v0.3.0.4 — ghost-session gate. Runs BEFORE sink_lock, because the
+        # lock touches the sink file into existence to have something to
+        # flock; the no-artifact decision must happen while the trace is
+        # still genuinely absent. A Claude Code app restart fires SessionEnd
+        # for a transient session that never did anything — without this
+        # gate that leaves a 2-event ghost trace on every restart.
+        gate_parsed: Optional[dict] = None
+        if ctx.hook_event_name == "SessionEnd" and not sink_path.exists():
+            verdict, gate_parsed = self._session_end_gate_verdict(ctx)
+            if verdict == _GATE_EMPTY:
+                logger.debug(
+                    "claude_code_hook: SessionEnd for unseen session %s "
+                    "positively empty; no artifact created",
+                    ctx.session_id[:12],
+                )
+                return
+            # _GATE_EMITTABLE carries the parse forward (no re-parse).
+            # _GATE_UNCERTAIN leaves gate_parsed None and the pre-gate
+            # flow below runs unchanged (fail-open, never a silent ghost
+            # classification of a potentially legitimate session).
+
         _maybe_warn_sink_size(sink_path)
 
         # Lock covers the entire read-plus-append-plus-sidecar-update
@@ -626,8 +675,11 @@ class ClaudeCodeGovernanceHook:
             elif ctx.hook_event_name == "SessionEnd":
                 # v0.2.6.1 — parse the flushed transcript and append one
                 # token-bearing CONTEXT_SNAPSHOT per model turn (requestId).
-                # Fail-open + idempotent (see the helper).
-                self._emit_session_end_token_batch(builder, sink, ctx, sink_path)
+                # Fail-open + idempotent (see the helper). v0.3.0.4: when the
+                # gate above already parsed the transcript, reuse that parse.
+                self._emit_session_end_token_batch(
+                    builder, sink, ctx, sink_path, parsed=gate_parsed
+                )
             else:
                 # SessionStart / UserPromptSubmit etc. For a new session we've
                 # already emitted REG + INTENT above, which is the correct
@@ -834,12 +886,50 @@ class ClaudeCodeGovernanceHook:
         if ctx_event:
             sink.write(ctx_event, ctx.session_id)
 
+    def _session_end_gate_verdict(
+        self, ctx: _HookContext
+    ) -> Tuple[str, Optional[dict]]:
+        """Three-way verdict for a SessionEnd whose session has no trace yet.
+
+        Suppressing artifact creation requires POSITIVE establishment of the
+        empty condition:
+
+        * ``_GATE_EMPTY`` — positively nothing to emit: no transcript
+          reference supplied (the confirmed app-restart ghost signature),
+          the transcript file positively does not exist
+          (``FileNotFoundError`` specifically), or a normal parse yields
+          zero emittable turns. The caller creates NO artifact.
+        * ``_GATE_EMITTABLE`` — a normal parse yields at least one emittable
+          turn. The parse is returned so it is not repeated.
+        * ``_GATE_UNCERTAIN`` — any other stat/parse failure. The caller
+          must fall through to the pre-gate flow unchanged: a potentially
+          legitimate SessionEnd-first session is never silently treated as
+          a ghost. The worst case of uncertainty is today's 2-event
+          artifact, never lost evidence.
+        """
+        if not ctx.transcript_path:
+            return _GATE_EMPTY, None
+        try:
+            os.stat(ctx.transcript_path)
+        except FileNotFoundError:
+            return _GATE_EMPTY, None
+        except OSError:
+            return _GATE_UNCERTAIN, None
+        try:
+            parsed = parse_transcript_file(ctx.transcript_path)
+        except Exception:
+            return _GATE_UNCERTAIN, None
+        if _parsed_has_emittable_turns(parsed):
+            return _GATE_EMITTABLE, parsed
+        return _GATE_EMPTY, None
+
     def _emit_session_end_token_batch(
         self,
         builder: EventBuilder,
         sink: SinkWriter,
         ctx: _HookContext,
         sink_path: Path,
+        parsed: Optional[dict] = None,
     ) -> None:
         """Parse the SessionEnd transcript → append per-turn token snapshots.
 
@@ -856,14 +946,17 @@ class ClaudeCodeGovernanceHook:
         emitted requestIds so a repeated SessionEnd skips them (first line of
         defence; the analyzer's (session_id, llm_turn_id) dedupe is the second).
         """
-        if not ctx.transcript_path:
-            logger.debug(
-                "claude_code_hook: SessionEnd without transcript_path; "
-                "no token batch"
-            )
-            return
+        if parsed is None:
+            # v0.3.0.4: `parsed` is supplied when the first-invocation gate
+            # already parsed this transcript; otherwise parse here as before.
+            if not ctx.transcript_path:
+                logger.debug(
+                    "claude_code_hook: SessionEnd without transcript_path; "
+                    "no token batch"
+                )
+                return
 
-        parsed = parse_transcript_file(ctx.transcript_path)
+            parsed = parse_transcript_file(ctx.transcript_path)
         already = read_emitted_turns(sink_path, ctx.session_id)
         newly_emitted: List[str] = []
 
@@ -873,9 +966,9 @@ class ClaudeCodeGovernanceHook:
             turn = parsed["turns"][request_id]
             tokens = turn["tokens"]
             tool_use_ids = turn.get("tool_use_ids") or []
-            # Skip turns with neither burn nor a tool call — nothing to add to
-            # total OR attributable burn.
-            if not turn.get("tokens_populated") and not tool_use_ids:
+            # Skip turns with neither burn nor a tool call — nothing to add
+            # to total OR attributable burn. Shares the gate's predicate.
+            if not _turn_is_emittable(turn):
                 continue
             # context_size_tokens (required int) = the turn's token footprint.
             burn = derive_turn_token_burn(tokens, turn.get("provider"))[
