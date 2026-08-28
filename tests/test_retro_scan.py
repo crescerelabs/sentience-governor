@@ -1192,8 +1192,8 @@ def test_53_state_n_rows_and_session_ordering(config_root, home):
     assert "2 sessions stand out." in rendered
     assert "  1. s-big" in rendered
     assert "  2. s-small" in rendered
-    assert "     targeted writes into 2 other projects" in rendered
-    assert "     targeted writes into 1 other project" in rendered
+    assert "     targeted writes into other project directories" in rendered
+    assert "     targeted writes into another project directory" in rendered
     caption = "Showing the strongest retrospective findings first."
     reviewer = "Reader is a retrospective reviewer, not live governance."
     assert rendered.index(caption) < rendered.index(reviewer)
@@ -1999,3 +1999,40 @@ class TestSummaryWordingMatchesScreenA:
         heading = "Claude targeted writes into another project directory:"
         assert heading in render_scan(result)
         assert heading in render_scan_detail(result)
+
+    def test_state_n_compact_line_uses_the_pinned_forms(self, config_root, home):
+        """The numbered list is the third surface for the same phrase. It
+        carries no subject, so it takes the phrase without "Claude", and it
+        never reintroduces the destination count the headings refuse."""
+        rendered = render_scan(cross_project_corpus(config_root, home, {
+            "s-one": [("repo-x", 1)],
+            "s-many": [("repo-y", 5), ("repo-z", 4)],
+        }))
+        assert "2 sessions stand out." in rendered
+        assert "     targeted writes into another project directory" in rendered
+        assert "     targeted writes into other project directories" in rendered
+
+    def test_state_n_compact_line_claims_no_project_count(
+        self, config_root, home
+    ):
+        rendered = render_scan(cross_project_corpus(config_root, home, {
+            "s-one": [("repo-x", 1)],
+            "s-many": [("repo-y", 5), ("repo-z", 4)],
+        }))
+        for forbidden in ("2 other projects", "1 other project",
+                          "2 projects", "into 2 "):
+            assert forbidden not in rendered
+
+    def test_every_summary_state_agrees_on_the_phrase(self, config_root, home):
+        """One standout renders the heading; many standouts render both the
+        compact line and the heading in the per-session detail below it.
+        Whichever state the operator lands in, the vocabulary is the same."""
+        one = render_scan(_cross_result(config_root, home))
+        many = render_scan(cross_project_corpus(config_root, home, {
+            "s-one": [("repo-x", 1)],
+            "s-many": [("repo-y", 5), ("repo-z", 4)],
+        }))
+        for rendered in (one, many):
+            assert "targeted writes into another project directory" in rendered
+            assert "other projects" not in rendered
+            assert "project%s" % "s:" not in rendered

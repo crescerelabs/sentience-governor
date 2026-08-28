@@ -2034,11 +2034,15 @@ _LIST_CAPTION = "Showing the strongest retrospective findings first."
 _MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun",
            "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 
-# Two pinned forms, no other variation (§4.5), shared by the summary and
-# the detail view. Reader knows the destination roots, so plurality here
-# is grammar, not an aggregate project count.
-_CROSS_ONE = "Claude targeted writes into another project directory:"
-_CROSS_MANY = "Claude targeted writes into other project directories:"
+# Two pinned forms, no other variation (§4.5), shared by every summary
+# state and the detail view. Reader knows the destination roots, so
+# plurality here is grammar, not an aggregate project count. The compact
+# list line in State N takes the same phrase without the subject, so the
+# three surfaces cannot drift apart.
+_CROSS_PHRASE_ONE = "targeted writes into another project directory"
+_CROSS_PHRASE_MANY = "targeted writes into other project directories"
+_CROSS_ONE = "Claude %s:" % _CROSS_PHRASE_ONE
+_CROSS_MANY = "Claude %s:" % _CROSS_PHRASE_MANY
 
 _DEST_ROWS_CAP = 10          # per-session destination rows (§8.4)
 _DETAIL_SESSIONS = 3         # State N: detail for the strongest few
@@ -2540,8 +2544,8 @@ def render_scan(result: Dict[str, Any]) -> str:
             cross = _cross_project_pairs(mine)
             non_project = _non_project_pairs(mine)
             if cross:
-                lines.append("     targeted writes into %d other project%s"
-                             % (len(cross), "" if len(cross) == 1 else "s"))
+                lines.append("     " + (_CROSS_PHRASE_ONE if len(cross) == 1
+                                        else _CROSS_PHRASE_MANY))
             elif non_project:
                 lines.extend(_wrap_body(
                     "targeted %d write operations into locations where "
