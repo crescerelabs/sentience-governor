@@ -6,6 +6,29 @@ Breaking changes bump the minor version until 1.0. After 1.0, breaking changes b
 
 ---
 
+## 0.3.1.1 — 2026-08-28
+
+**The evidence behind the review.** `sentience scan --detail` shows the paths
+behind the summary's numbers, grouped by session: cross-project evidence
+grouped by destination project with per-path operation counts, the sessions
+that were reviewed without standing out under a heading that says so, and one
+line accounting for the reviewed sessions that produced no findings without
+claiming they were clean. The summary now names that path itself.
+
+`--detail` and `--json` are mutually exclusive: one renders a screen for a
+person, the other emits data for a program.
+
+The opt-in MCP server gains `sentience_scan(detail, since)`, the same review as
+structured data, so the evidence can be asked for and answered inside a Claude
+Code session. `since` accepts `7d`, `30d` or `all`. It is a Reader capability,
+not an eighth governance tool: the seven governance tools read a Sentience
+session, while this reviews another system's history. Read-only in every mode.
+
+Same scan, same window, same findings. `--detail` is depth, never a broader
+search, and it finds nothing the summary did not already find.
+
+---
+
 ## 0.3.1 — 2026-08-25
 
 **Review the Claude Code history you already have.** `sentience scan` reads the

@@ -71,9 +71,9 @@ One session stands out.
   "api-service refactor"
    working in  ~/api-service
 
-  Claude targeted writes into another project:
+  Claude targeted writes into another project directory:
 
-    ~/shared-client               67 ops
+    ~/shared-client               67 write operations
 
 Counts are write operations Claude issued as recorded in
 its history. Reader does not verify completion.
@@ -81,9 +81,39 @@ its history. Reader does not verify completion.
 Reader is a retrospective reviewer, not live governance.
 It cannot establish what you intended or authorized, or
 whether an action complied with policy.
+
+  Inspect the evidence: sentience scan --detail
 ```
 
-`--since 7d|30d|all` narrows the window, filtering on each record's own timestamp and never on file mtime; the default is `all`. `--json` emits the structured aggregate.
+The summary answers *what stood out*. It shows representative destinations, not every path, because a screen that lists everything is a screen nobody reads.
+
+`--detail` answers *what actually happened*: the same review at greater depth, grouped by session. Each destination project gets its own group with its own paths and per-path operation counts, and the sessions that were reviewed without standing out are listed under a heading that says exactly that. It is the same scan over the same window — never a broader search, a deeper analysis, or a different classification. Reader finds nothing in `--detail` that it did not already find in the summary.
+
+```bash
+$ sentience scan --detail
+Sentience · Retrospective Review — evidence
+
+9 Claude Code sessions reviewed
+Apr 14 → Aug 25 · local · transcripts read-only
+
+Sessions that stand out
+
+  "api-service refactor"
+   working in  ~/api-service
+
+  Claude targeted writes into another project directory:
+
+    ~/shared-client — 67 write operations
+
+         9  src/client.ts
+         7  README.md
+         5  package.json
+       ...
+```
+
+`--since 7d|30d|all` narrows the window, filtering on each record's own timestamp and never on file mtime; the default is `all`. It applies identically to the summary and to `--detail`.
+
+`--json` emits the structured aggregate. `--detail` and `--json` are mutually exclusive: one renders a screen for a person, the other emits data for a program, and asking for both is a usage error rather than a silent choice between them.
 
 Transcripts are read from `~/.claude` (or `$CLAUDE_CONFIG_DIR`). Prompt content and tool results are never inspected; Bash commands are counted, never interpreted. Where a destination cannot be attributed to a project today — a directory that is not a repository, or one since moved or deleted — the report says exactly that rather than asserting a project.
 
@@ -162,6 +192,8 @@ From 0.3.0.3, any other `sentience` command run inside an already-configured pro
 ### `sentience-mcp-server`
 
 The opt-in MCP server (new in 0.3.0) exposes seven governance tools Claude can call inside a session: `sentience_explain` and `sentience_profile_view` (session-independent reads), `sentience_pulse` / `sentience_intent` / `sentience_violations` (reads of the **last completed** session, each naming the session it read), `sentience_session_status` (the live session, **structural-only**: no token / burn / pulse figure, since token analysis is unavailable until SessionEnd), and `sentience_declare_intent(objective, scope)` (the one forward-looking write). It is stdio, local, no HTTP, no auth, and never registered by default.
+
+Alongside those seven, the server exposes the retrospective Reader as a separate capability: `sentience_scan(detail, since)` (new in 0.3.1.1). It is **not** an eighth governance tool. The seven above govern a Sentience session — what an agent declared, what it did, and what fired. `sentience_scan` reviews the Claude Code history already on your machine: another system's records, read retrospectively, with no governance session involved. It returns the review summary, and `detail=True` returns the evidence behind it grouped by session, mirroring `sentience scan --detail`. `since` accepts `7d`, `30d` or `all`. Read-only in every mode, invalid input included.
 
 A `declare_intent` event is server-written, append-only, and **non-retroactive**: matching activity after it stops firing POL-001 at capture, while pre-declaration events keep theirs. It is recorded as `intent_source = inferred` (agent-declared through MCP, so its content is untrusted and **not** integrator-vouched; never read it as an operator endorsement). It fails closed on any uncertain session binding.
 

@@ -5,6 +5,47 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.1.1] — 2026-08-28
+
+**The evidence behind the review.** 0.3.1 could tell you a session wrote into
+another project directory, and how many times, and then stopped. `sentience
+scan --detail` shows the paths behind that number, grouped by session, and the
+summary names the evidence path itself rather than leaving it to be discovered
+from `--help`. The same review and the same evidence are reachable through the
+opt-in MCP server.
+
+### Added
+- **`sentience scan --detail`** — the same review at greater depth. Cross-project
+  evidence is grouped by destination project, each group carrying its own paths
+  and per-path operation counts; sessions that were reviewed without standing
+  out appear under a heading that says exactly that; and one line accounts for
+  the reviewed sessions that produced no findings, without claiming they were
+  clean. Mutually exclusive with `--json`: one renders a screen for a person,
+  the other emits data for a program.
+- **A continuation line on the summary** — `Inspect the evidence: sentience scan
+  --detail`, shown only when detail would show something.
+- **`sentience_scan(detail, since)` on the MCP server** — the retrospective
+  review as structured data, so the evidence can be asked for and answered
+  inside a Claude Code session. `detail=True` returns the evidence grouped by
+  session. `since` accepts `7d`, `30d` or `all`. Read-only in every mode,
+  invalid input included. It is a Reader capability, **not** an eighth
+  governance tool: the seven governance tools read a Sentience session, while
+  this reviews another system's history.
+
+### Changed
+- The summary now says `Claude targeted writes into another project directory:`
+  and counts `write operations` rather than `ops`, matching the evidence view.
+  Neither surface states an aggregate count of destination projects.
+
+### Notes
+- **`--detail` is depth, not breadth.** Same scan, same window, same findings:
+  it never performs a broader search, a deeper analysis, or a different
+  classification, and it finds nothing the summary did not already find.
+- **Zero writes, unchanged.** Both surfaces read transcripts and touch nothing
+  else, on the CLI and over MCP alike.
+
+---
+
 ## [0.3.1] — 2026-08-25
 
 **Retrospective review of the Claude Code history you already have.**

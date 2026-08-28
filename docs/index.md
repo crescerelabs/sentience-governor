@@ -15,9 +15,21 @@ Inside Claude Code, type `/sentience-help` or `/sentience-pulse` — `sentience 
 
 Everything else can wait.
 
+## Review what already happened
+
+You do not have to instrument anything first. `sentience scan` reviews the Claude Code history already on your machine and reports which sessions recorded write activity outside the project they were working in. Local and read-only.
+
+1. **Review** → `sentience scan` reads the transcripts Claude Code already keeps
+2. **See what stands out** → the summary names the sessions worth a look, and why
+3. **Inspect the evidence** → `sentience scan --detail` shows the paths behind that, grouped by session
+
+The same review runs inside Claude Code as `/sentience-review`, and through the opt-in MCP server. Full detail in [Commands](./commands.md).
+
+Reader is a retrospective reviewer, not live governance. It reports what the recorded history shows; it cannot establish what you intended or authorized, or whether an action complied with policy.
+
 ## What you get after a run
 
-Sentience turns an agent session into a local pulse:
+Sentience Governor turns an agent session into a local pulse:
 
 - What the agent did
 - Which tools ran, and which kinds of work rode the expensive turns
@@ -61,17 +73,17 @@ Trace = all events for a session
 
 ## A governance runtime
 
-Sentience wraps your agent at the execution boundary with five control points:
+Sentience Governor observes your agent at the execution boundary and records six governed event types:
 
-`AGENT_REGISTERED`, `INTENT_DECLARED`, `SCOPE_ASSERTED`, `CONTEXT_SNAPSHOT`, `MEMORY_WRITE_ATTEMPT`.
+`AGENT_REGISTERED`, `INTENT_DECLARED`, `SCOPE_ASSERTED`, `CONTEXT_SNAPSHOT`, `MEMORY_WRITE_ATTEMPT`, `GOVERNANCE_ERROR`.
 
-It emits a structured event at each control point. Each event is evaluated against five default policy rules. Violations are annotated with the consequence real-time enforcement would apply — enforcement itself is planned for a future paid tier.
+It emits a structured event at each capture point. Each event is evaluated against five default policy rules. Violations are annotated with the consequence real-time enforcement would apply — enforcement itself is planned for a future paid tier.
 
 Nothing gets blocked. Everything is visible.
 
 ## Claude Code support
 
-For Claude Code, `sentience init claude-code` wires the local hook into your project and installs six `/sentience-*` skills. The hook observes tool calls, records governance events, and captures per-turn token burn from the session transcript.
+For Claude Code, `sentience init claude-code` wires the local hook into your project and installs seven `/sentience-*` skills. The hook observes tool calls, records governance events, and captures per-turn token burn from the session transcript.
 
 That lets `sentience pulse` connect tool activity, policy signals, intent drift, and token burn in one report. Inside Claude Code, `/sentience-pulse` renders that report inline without switching to a terminal.
 
