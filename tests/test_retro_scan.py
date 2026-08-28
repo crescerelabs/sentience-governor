@@ -1163,7 +1163,9 @@ def test_52_state_one_is_the_hero_screen(config_root, home):
     assert "One session stands out." in rendered
     assert '"Alpha work"' in rendered
     assert "working in  ~/repo-src" in rendered
-    assert "Claude targeted writes into another project:" in rendered
+    assert "Claude targeted writes into another project directory:" in rendered
+    # Screen A wording: destination rows read "write operations", not "ops".
+    assert "write operations" in rendered
     # Resolver-honest wording, never "outside any project", and reported
     # as operation volume rather than an inferred count of locations.
     assert ("and 1 write operations targeted locations where Reader"
@@ -1190,8 +1192,8 @@ def test_53_state_n_rows_and_session_ordering(config_root, home):
     assert "2 sessions stand out." in rendered
     assert "  1. s-big" in rendered
     assert "  2. s-small" in rendered
-    assert "     targeted writes into 2 other projects" in rendered
-    assert "     targeted writes into 1 other project" in rendered
+    assert "     targeted writes into other project directories" in rendered
+    assert "     targeted writes into another project directory" in rendered
     caption = "Showing the strongest retrospective findings first."
     reviewer = "Reader is a retrospective reviewer, not live governance."
     assert rendered.index(caption) < rendered.index(reviewer)
@@ -1683,3 +1685,354 @@ def test_cp7_non_project_only_corpus_still_stands_out(config_root, home):
     assert "One session stands out." in rendered
     assert "No reportable project-boundary write activity" not in rendered
     assert "Reader cannot identify a project today" in flat(rendered)
+
+
+# ---------------------------------------------------------------------------
+# v0.3.1.1 — the evidence path: `sentience scan --detail` (plan §4).
+#
+# Detail is a presentation-only view over the same scan result: it performs
+# no analysis, discovers no evidence, and classifies nothing.
+# ---------------------------------------------------------------------------
+
+from sentience_governor.analyze.renderers import render_scan_detail  # noqa: E402
+
+
+def _cross_result(config_root, home, dests=("repo-b",), extra=()):
+    """A session working in repo-a that wrote into one or more other repos."""
+    source = git_repo(home, "repo-a")
+    records = []
+    for i, name in enumerate(dests):
+        dest = git_repo(home, name)
+        records.append(activity(
+            "s", cwd=str(source),
+            tools=[write_block(dest / ("f%d.txt" % j)) for j in range(i + 1)],
+        ))
+    records.extend(extra)
+    return scan_records(config_root, records)
+
+
+class TestDetailContinuation:
+    """§4.1 — the summary names the evidence path; it is never something the
+    operator has to discover from CLI help."""
+
+    def test_summary_offers_continuation_when_evidence_exists(
+        self, config_root, home
+    ):
+        rendered = render_scan(_cross_result(config_root, home))
+        assert "Inspect the evidence: sentience scan --detail" in rendered
+
+    def test_summary_offers_no_continuation_without_findings(self, config_root):
+        result = scan_records(config_root, [activity("s", tools=[])])
+        assert result["findings"] == []
+        assert "sentience scan --detail" not in render_scan(result)
+
+
+class TestDetailSessionHierarchy:
+    """§4.4 — two named sections, neither implying the other's sessions were
+    safe, normal or unimportant."""
+
+    def _mixed(self, config_root, home):
+        # One standout (cross-project) plus one carrying only non_project.
+        source = git_repo(home, "repo-a")
+        dest = git_repo(home, "repo-b")
+        loose = home / "not-a-repo"
+        loose.mkdir(parents=True, exist_ok=True)
+        return scan_records(config_root, [
+            activity("standout", cwd=str(source),
+                     tools=[write_block(dest / "a.txt")]),
+            activity("quiet", cwd=str(source),
+                     tools=[write_block(loose / "b.txt")]),
+        ])
+
+    def test_standout_section_precedes_other_reviewed(self, config_root, home):
+        rendered = render_scan_detail(self._mixed(config_root, home))
+        assert "Sessions that stand out" in rendered
+        assert "Other reviewed sessions" in rendered
+        assert (rendered.index("Sessions that stand out")
+                < rendered.index("Other reviewed sessions"))
+
+    def test_other_section_carries_the_neutral_note(self, config_root, home):
+        rendered = render_scan_detail(self._mixed(config_root, home))
+        assert "did not meet Reader's standout criteria" in rendered
+        after = rendered[rendered.index("Other reviewed sessions"):]
+        for forbidden in ("stands out", "safe", "normal", "unimportant",
+                          "clean session"):
+            assert forbidden not in after
+
+    def test_no_empty_other_section_when_all_standout(self, config_root, home):
+        rendered = render_scan_detail(_cross_result(config_root, home))
+        assert "Other reviewed sessions" not in rendered
+
+    def test_accounting_counts_sessions_carrying_findings_not_standout(
+        self, config_root, home
+    ):
+        """The misnamed `sessions_with_findings` holds STANDOUT sessions, so
+        human accounting is computed from the findings array (§2.2)."""
+        result = self._mixed(config_root, home)
+        assert len(result["sessions_with_findings"]) == 1
+        assert len({f.session_id for f in result["findings"]}) == 2
+        rendered = render_scan_detail(result)
+        # 2 sessions reviewed, both carry findings -> no remainder line.
+        assert "produced no findings" not in rendered
+
+    def test_accounting_refuses_the_clean_reading(self, config_root, home):
+        source = git_repo(home, "repo-a")
+        dest = git_repo(home, "repo-b")
+        result = scan_records(config_root, [
+            activity("s", cwd=str(source), tools=[write_block(dest / "a.txt")]),
+            activity("idle", cwd=str(source), tools=[read_block(source / "r.md")]),
+        ])
+        rendered = render_scan_detail(result)
+        assert "produced no findings" in rendered
+        assert "not a statement that they were clean" in rendered
+
+
+class TestDetailEvidenceGroups:
+    """§4.5 — orient before listing; two pinned cross-project headings; the
+    non-project claim stays volume-only."""
+
+    def test_single_destination_heading_is_singular(self, config_root, home):
+        rendered = render_scan_detail(_cross_result(config_root, home))
+        assert "Claude targeted writes into another project directory:" in rendered
+        assert "other project directories:" not in rendered
+
+    def test_multiple_destinations_heading_is_plural(self, config_root, home):
+        result = _cross_result(config_root, home, dests=("repo-b", "repo-c"))
+        rendered = render_scan_detail(result)
+        assert "Claude targeted writes into other project directories:" in rendered
+        assert "into another project directory:" not in rendered
+
+    def test_destinations_are_subgrouped_never_flattened(self, config_root, home):
+        result = _cross_result(config_root, home, dests=("repo-b", "repo-c"))
+        rendered = render_scan_detail(result)
+        assert "~/repo-b — " in rendered
+        assert "~/repo-c — " in rendered
+
+    def test_no_aggregate_destination_project_count(self, config_root, home):
+        """Calculable from `dest_root`, deliberately never claimed (§4.5)."""
+        result = _cross_result(config_root, home, dests=("repo-b", "repo-c"))
+        rendered = render_scan_detail(result)
+        for forbidden in ("2 other projects", "2 projects", "into 2 "):
+            assert forbidden not in rendered
+
+    def test_cross_project_paths_render_relative_to_destination_root(
+        self, config_root, home
+    ):
+        source = git_repo(home, "repo-a")
+        dest = git_repo(home, "repo-b")
+        nested = dest / "docs" / "guide"
+        nested.mkdir(parents=True, exist_ok=True)
+        result = scan_records(config_root, [
+            activity("s", cwd=str(source),
+                     tools=[write_block(nested / "README.md")]),
+        ])
+        rendered = render_scan_detail(result)
+        assert "  docs/guide/README.md" in rendered
+        # The root is stated once in the orientation line, not on every row.
+        assert "~/repo-b/docs/guide/README.md" not in rendered
+
+    def test_non_project_states_volume_only(self, config_root, home):
+        source = git_repo(home, "repo-a")
+        loose = home / "loose"
+        loose.mkdir(parents=True, exist_ok=True)
+        result = scan_records(config_root, [
+            activity("s", cwd=str(source), tools=[
+                write_block(loose / "a.md"), write_block(loose / "b.md")]),
+        ])
+        rendered = render_scan_detail(result)
+        assert "write operations targeting locations where Reader" in rendered
+        assert "cannot identify a project today" in rendered
+        for forbidden in ("2 targets", "2 locations", "2 destinations",
+                          "2 trees", "distinct"):
+            assert forbidden not in rendered
+
+    def test_non_project_paths_stay_absolute_and_abbreviated(
+        self, config_root, home
+    ):
+        source = git_repo(home, "repo-a")
+        loose = home / "loose"
+        loose.mkdir(parents=True, exist_ok=True)
+        result = scan_records(config_root, [
+            activity("s", cwd=str(source), tools=[write_block(loose / "a.md")]),
+        ])
+        assert "~/loose/a.md" in render_scan_detail(result)
+
+
+class TestDetailFramingAndBounds:
+    """§4.6 and §12 — same framing as the summary; omission disclosure is
+    conditional, never noise at zero."""
+
+    def test_framing_elements_present(self, config_root, home):
+        rendered = render_scan_detail(_cross_result(config_root, home))
+        assert "Reader is a retrospective reviewer, not live governance." in rendered
+        assert "Not evaluated" in rendered
+        assert "Reader does not inspect or use your prompt content." in rendered
+        assert "Sentience Governor goes further by evaluating" in rendered
+        assert "Reader does not verify completion." in rendered
+
+    def test_shell_count_is_review_wide(self, config_root, home):
+        """Detail spans every session carrying findings plus an accounting of
+        the rest, so a per-standout count would understate what was skipped."""
+        rendered = render_scan_detail(_cross_result(config_root, home))
+        assert "across the review" in rendered
+
+    def test_no_truncation_language_when_counters_are_zero(
+        self, config_root, home
+    ):
+        result = _cross_result(config_root, home)
+        assert result["findings_omitted"] == 0
+        assert result["targets_omitted"] == 0
+        rendered = render_scan_detail(result)
+        for forbidden in ("not shown", "beyond the collection bound",
+                          "0 findings", "truncat"):
+            assert forbidden not in rendered
+
+    def test_display_omission_disclosed_when_non_zero(self, config_root, home):
+        result = _cross_result(config_root, home)
+        result["findings_omitted"] = 3
+        assert "3 findings not shown" in flat(render_scan_detail(result))
+
+    def test_bounded_analysis_omission_disclosed_distinctly(
+        self, config_root, home
+    ):
+        result = _cross_result(config_root, home)
+        result["targets_omitted"] = 7
+        rendered = flat(render_scan_detail(result))
+        assert "7 targets beyond the collection bound were not ranked" in rendered
+        assert "findings not shown" not in rendered
+
+    def test_no_scores_or_risk_language(self, config_root, home):
+        rendered = render_scan_detail(_cross_result(config_root, home)).lower()
+        for forbidden in ("severity", "risk", "confidence", "score",
+                          "successfully wrote", "modified"):
+            assert forbidden not in rendered
+
+    def test_zero_findings_degrades_to_state_zero(self, config_root):
+        result = scan_records(config_root, [activity("s", tools=[])])
+        rendered = render_scan_detail(result)
+        assert "No reportable project-boundary write activity" in rendered
+        assert "Sessions that stand out" not in rendered
+
+    def test_private_renderer_metadata_never_leaks(self, config_root, home):
+        """`_home` and `_ranked_sessions` drive the render; neither is public."""
+        from sentience_governor import retro
+        result = _cross_result(config_root, home)
+        payload = retro.json_payload(result)
+        assert "_home" not in payload
+        assert "_ranked_sessions" not in payload
+
+
+class TestDetailCliSurface:
+    """§4.2 and §4.7 — mutually exclusive modes, help wording, and identical
+    window semantics."""
+
+    def _main(self, argv, monkeypatch):
+        import sys
+        from sentience_governor.cli import ux
+        monkeypatch.setattr(sys, "argv", ["sentience"] + argv)
+        return ux.main()
+
+    def test_detail_and_json_are_mutually_exclusive(self, monkeypatch, capsys):
+        import pytest as _pytest
+        with _pytest.raises(SystemExit) as exc:
+            self._main(["scan", "--detail", "--json"], monkeypatch)
+        assert exc.value.code == 2
+        err = capsys.readouterr().err
+        assert "not allowed with argument" in err
+
+    def test_help_describes_detail_without_implying_deeper_analysis(
+        self, monkeypatch, capsys
+    ):
+        import pytest as _pytest
+        with _pytest.raises(SystemExit):
+            self._main(["scan", "--help"], monkeypatch)
+        out = capsys.readouterr().out
+        assert "Show the evidence behind the retrospective review" in out
+        assert "grouped by session" in out
+        lowered = out.lower()
+        for forbidden in ("deeper analysis", "broader scan", "re-scan",
+                          "additional inference", "reclassif"):
+            assert forbidden not in lowered
+
+    def test_detail_uses_the_same_window_as_the_summary(self, config_root, home):
+        """§4.7: detail is presentation over the same result — no wider scan."""
+        source = git_repo(home, "repo-a")
+        dest = git_repo(home, "repo-b")
+        records = [activity("s", cwd=str(source),
+                            tools=[write_block(dest / "f.txt")],
+                            timestamp="2026-08-24T12:00:00.000Z")]
+        narrow = scan_records(config_root, records, since="7d", now=FIXED_NOW)
+        wide = scan_records(config_root, records, since="all", now=FIXED_NOW)
+        for result in (narrow, wide):
+            summary_ids = {f.session_id for f in result["findings"]}
+            assert summary_ids == {"s"}
+            assert '"s"' in render_scan_detail(result) or "s" in render_scan_detail(result)
+
+
+class TestSummaryWordingMatchesScreenA:
+    """v0.3.1.1 §4.3/§4.5 — the summary and the evidence view use one
+    vocabulary; neither says "projects" while the other says "project
+    directories", and neither claims a destination count."""
+
+    def test_summary_uses_the_pinned_singular_heading(self, config_root, home):
+        rendered = render_scan(_cross_result(config_root, home))
+        assert "Claude targeted writes into another project directory:" in rendered
+        assert "into another project:" not in rendered
+
+    def test_summary_uses_the_pinned_plural_heading_without_a_count(
+        self, config_root, home
+    ):
+        result = _cross_result(config_root, home, dests=("repo-b", "repo-c"))
+        rendered = render_scan(result)
+        assert "Claude targeted writes into other project directories:" in rendered
+        for forbidden in ("into 2 other projects", "2 projects"):
+            assert forbidden not in rendered
+
+    def test_destination_rows_say_write_operations(self, config_root, home):
+        rendered = render_scan(_cross_result(config_root, home))
+        assert "1 write operation" in rendered
+        assert " ops" not in rendered
+        assert " op\n" not in rendered
+
+    def test_summary_and_detail_share_the_heading(self, config_root, home):
+        result = _cross_result(config_root, home)
+        heading = "Claude targeted writes into another project directory:"
+        assert heading in render_scan(result)
+        assert heading in render_scan_detail(result)
+
+    def test_state_n_compact_line_uses_the_pinned_forms(self, config_root, home):
+        """The numbered list is the third surface for the same phrase. It
+        carries no subject, so it takes the phrase without "Claude", and it
+        never reintroduces the destination count the headings refuse."""
+        rendered = render_scan(cross_project_corpus(config_root, home, {
+            "s-one": [("repo-x", 1)],
+            "s-many": [("repo-y", 5), ("repo-z", 4)],
+        }))
+        assert "2 sessions stand out." in rendered
+        assert "     targeted writes into another project directory" in rendered
+        assert "     targeted writes into other project directories" in rendered
+
+    def test_state_n_compact_line_claims_no_project_count(
+        self, config_root, home
+    ):
+        rendered = render_scan(cross_project_corpus(config_root, home, {
+            "s-one": [("repo-x", 1)],
+            "s-many": [("repo-y", 5), ("repo-z", 4)],
+        }))
+        for forbidden in ("2 other projects", "1 other project",
+                          "2 projects", "into 2 "):
+            assert forbidden not in rendered
+
+    def test_every_summary_state_agrees_on_the_phrase(self, config_root, home):
+        """One standout renders the heading; many standouts render both the
+        compact line and the heading in the per-session detail below it.
+        Whichever state the operator lands in, the vocabulary is the same."""
+        one = render_scan(_cross_result(config_root, home))
+        many = render_scan(cross_project_corpus(config_root, home, {
+            "s-one": [("repo-x", 1)],
+            "s-many": [("repo-y", 5), ("repo-z", 4)],
+        }))
+        for rendered in (one, many):
+            assert "targeted writes into another project directory" in rendered
+            assert "other projects" not in rendered
+            assert "project%s" % "s:" not in rendered

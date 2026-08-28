@@ -2034,6 +2034,16 @@ _LIST_CAPTION = "Showing the strongest retrospective findings first."
 _MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun",
            "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 
+# Two pinned forms, no other variation (§4.5), shared by every summary
+# state and the detail view. Reader knows the destination roots, so
+# plurality here is grammar, not an aggregate project count. The compact
+# list line in State N takes the same phrase without the subject, so the
+# three surfaces cannot drift apart.
+_CROSS_PHRASE_ONE = "targeted writes into another project directory"
+_CROSS_PHRASE_MANY = "targeted writes into other project directories"
+_CROSS_ONE = "Claude %s:" % _CROSS_PHRASE_ONE
+_CROSS_MANY = "Claude %s:" % _CROSS_PHRASE_MANY
+
 _DEST_ROWS_CAP = 10          # per-session destination rows (§8.4)
 _DETAIL_SESSIONS = 3         # State N: detail for the strongest few
 _BODY_WIDTH = 52
@@ -2076,8 +2086,8 @@ def _dest_rows(pairs: List[tuple], home: str) -> List[str]:
     rows = []
     for path, count in ordered[:_DEST_ROWS_CAP]:
         label = _abbrev(path, home)
-        rows.append("    " + label.ljust(28) + "%4d %s" % (
-            count, "op" if count == 1 else "ops"))
+        rows.append("    " + label.ljust(28) + "%4d write operation%s" % (
+            count, "" if count == 1 else "s"))
     remaining = len(ordered) - _DEST_ROWS_CAP
     if remaining > 0:
         rows.append("    … and %d more destinations" % remaining)
@@ -2168,11 +2178,11 @@ def _session_block(session_id: str, findings: List, labels: Dict,
 
     if cross:
         lines.append("")
-        if len(cross) == 1:
-            lines.append("  Claude targeted writes into another project:")
-        else:
-            lines.append(
-                "  Claude targeted writes into %d other projects:" % len(cross))
+        # The two pinned forms (§4.5), shared with the detail view so one
+        # screen never says "project directory" and the other "projects".
+        # Grammatical agreement only: no aggregate destination count, which
+        # `dest_root` makes calculable but which Reader does not claim.
+        lines.append("  " + (_CROSS_ONE if len(cross) == 1 else _CROSS_MANY))
         lines.append("")
         lines.extend(_dest_rows(cross, home))
 
@@ -2254,10 +2264,20 @@ def _coverage_limits(result: Dict[str, Any]) -> List[str]:
     return _wrap_body(" · ".join(parts), indent="  ")
 
 
-def _not_evaluated(result: Dict[str, Any], standout: List[str]) -> List[str]:
-    """Bash and coverage limits, always outside the aha paragraph (§8.1)."""
+def _not_evaluated(result: Dict[str, Any], standout: List[str],
+                   review_wide: bool = False) -> List[str]:
+    """Bash and coverage limits, always outside the aha paragraph (§8.1).
+
+    ``review_wide`` scopes the shell count to the whole review rather than
+    to the standout sessions: the detail view covers every session
+    carrying findings plus an accounting of the rest, so a
+    per-standout-session count would understate what was not evaluated.
+    """
     by_session = result.get("by_session") or {}
-    if len(standout) == 1:
+    if review_wide:
+        shell_line = ("%s shell commands across the review"
+                      % format(result.get("shell_calls", 0), ","))
+    elif len(standout) == 1:
         shell = by_session.get(standout[0], {}).get("shell_calls", 0)
         shell_line = "%s shell commands in this session" % format(shell, ",")
     elif standout:
@@ -2270,6 +2290,199 @@ def _not_evaluated(result: Dict[str, Any], standout: List[str]) -> List[str]:
     lines = ["Not evaluated", "  " + shell_line, "  " + _PROMPT_EXCLUSION]
     lines.extend(_coverage_limits(result))
     return lines
+
+
+_DETAIL_HEADER = "Sentience · Retrospective Review — evidence"
+
+_STANDOUT_SECTION = "Sessions that stand out"
+_OTHER_SECTION = "Other reviewed sessions"
+
+# Neutral: states the selection fact and nothing more. Must never imply the
+# sessions were safe, normal, unimportant, or that they stood out (§4.4).
+_OTHER_SECTION_NOTE = (
+    "These sessions did not meet Reader's standout criteria. They\n"
+    "are included because this view shows the reviewed findings."
+)
+
+_CONFIG_HEADING = "Claude targeted writes to its global configuration:"
+
+# The continuation line (§4.1). Offered only when detail would show
+# something, so a clean review never advertises an empty page.
+_DETAIL_CONTINUATION = "  Inspect the evidence: sentience scan --detail"
+
+
+def _relative_to(target: str, root: str) -> str:
+    """A cross-project target shown relative to its destination root.
+
+    The root is stated once in the orientation line; repeating it on every
+    row is the only real noise in a long block (§4.8). Falls back to the
+    absolute form when the target is not under the root.
+    """
+    if root and target.startswith(root.rstrip("/") + "/"):
+        return target[len(root.rstrip("/")) + 1:]
+    return target
+
+
+def _finding_rows(findings: List, home: str, root: str = "") -> List[str]:
+    """Operation count then path, one row per finding, incoming rank order."""
+    rows = []
+    for finding in findings:
+        shown = (_relative_to(finding.target, root) if root
+                 else _abbrev(finding.target, home))
+        rows.append("     %5d  %s" % (finding.op_count, shown))
+    return rows
+
+
+def _detail_session_block(session_id: str, findings: List, labels: Dict,
+                          home: str) -> List[str]:
+    """One session's evidence: orient each group, then list its findings.
+
+    Paths are never dumped directly under a session (§4.5): every group
+    opens with an aggregate line built from what Reader already holds.
+    """
+    mine = _session_findings(findings, session_id)
+    lines = [_session_label_line(session_id, labels, "  ")]
+    source_root = next((f.source_root for f in mine if f.source_root), "")
+    if source_root:
+        lines.append("   working in  " + _abbrev(source_root, home))
+
+    config = [f for f in mine if f.finding_class == "claude_config"]
+    cross = [f for f in mine if f.finding_class == "cross_project"]
+    unidentified = [f for f in mine if f.finding_class == "non_project"]
+
+    if config:
+        lines.append("")
+        lines.append("  " + _CONFIG_HEADING)
+        lines.append("")
+        lines.extend(_finding_rows(config, home))
+
+    if cross:
+        # Subgrouped by the destination root Reader already recorded: one
+        # flat list would lose which project each path belongs to (§4.5).
+        roots: Dict[str, List] = {}
+        for finding in cross:
+            roots.setdefault(finding.dest_root, []).append(finding)
+        lines.append("")
+        lines.append("  " + (_CROSS_ONE if len(roots) == 1 else _CROSS_MANY))
+        ordered = sorted(
+            roots.items(),
+            key=lambda item: (-sum(f.op_count for f in item[1]), item[0]),
+        )
+        for root, items in ordered:
+            lines.append("")
+            lines.append("    %s — %d write operation%s" % (
+                _abbrev(root, home), sum(f.op_count for f in items),
+                "" if sum(f.op_count for f in items) == 1 else "s"))
+            lines.append("")
+            lines.extend(_finding_rows(items, home, root=root))
+
+    if unidentified:
+        # Volume only. Never a count of distinct targets, destinations,
+        # locations, trees or projects — Reader does not know it (§2.5).
+        lines.append("")
+        lines.extend(_wrap_body(
+            "%d write operations targeting locations where Reader cannot "
+            "identify a project today:" % _non_project_ops(unidentified),
+            indent="  "))
+        lines.append("")
+        lines.extend(_finding_rows(unidentified, home))
+
+    return lines
+
+
+def _reviewed_accounting(result: Dict[str, Any], with_findings: int) -> List[str]:
+    """One line for the reviewed sessions that produce no detail section.
+
+    Never N empty sections, and never a claim that those sessions were
+    clean: Reader reports only what it can classify (§4.4).
+    """
+    total = result.get("sessions", 0)
+    remainder = total - with_findings
+    if remainder <= 0:
+        return []
+    return _wrap_body(
+        "The other %d reviewed session%s produced no findings. That is not "
+        "a statement that they were clean: Reader reports only what it can "
+        "classify, and it did not evaluate the shell commands in any "
+        "session." % (remainder, "" if remainder == 1 else "s"),
+        indent="")
+
+
+def render_scan_detail(result: Dict[str, Any]) -> str:
+    """Render the evidence behind a scan review (plan §4.4).
+
+    The same review at greater depth, never a different document with
+    weaker framing: the reviewer statement, the ``Not evaluated`` block and
+    the closing bridge are carried unchanged. Pure, and reads the same
+    ``result`` as :func:`render_scan` including the private ``_home``.
+    """
+    findings = list(result.get("findings") or [])
+    labels = result.get("session_labels") or {}
+    home = result.get("_home") or ""
+    standout = list(result.get("sessions_with_findings") or [])
+
+    # Ordering comes from the shipped session ranking, carried as private
+    # renderer metadata beside ``_home``; the findings themselves arrive in
+    # ``rank_findings`` order and are never reordered here.
+    ranked = list(result.get("_ranked_sessions") or standout)
+    carrying = [sid for sid in ranked
+                if any(f.session_id == sid for f in findings)]
+    other = [sid for sid in carrying if sid not in standout]
+
+    sessions = result.get("sessions", 0)
+    lines = [_DETAIL_HEADER, ""]
+    lines.append("%d Claude Code session%s reviewed"
+                 % (sessions, "" if sessions == 1 else "s"))
+    period_start, period_end = result.get("period_start"), result.get("period_end")
+    provenance = "local · transcripts read-only"
+    if period_start and period_end:
+        lines.append("%s → %s · %s" % (_scan_date(period_start),
+                                       _scan_date(period_end), provenance))
+    else:
+        lines.append(provenance)
+
+    if not findings:
+        lines.append("")
+        lines.extend(_STATE_0_LEAD.split("\n"))
+        lines.append("")
+        lines.extend(_REVIEWER_STATEMENT.split("\n"))
+        lines.append("")
+        lines.extend(_not_evaluated(result, standout, review_wide=True))
+        lines.append("")
+        lines.extend(_CLOSING_BRIDGE.split("\n"))
+        return "\n".join(lines) + "\n"
+
+    if standout:
+        lines.append("")
+        lines.append(_STANDOUT_SECTION)
+        for session_id in standout:
+            lines.append("")
+            lines.extend(_detail_session_block(session_id, findings, labels, home))
+
+    if other:
+        lines.append("")
+        lines.append(_OTHER_SECTION)
+        lines.append("")
+        lines.extend(
+            "  " + part for part in _OTHER_SECTION_NOTE.split("\n"))
+        for session_id in other:
+            lines.append("")
+            lines.extend(_detail_session_block(session_id, findings, labels, home))
+
+    accounting = _reviewed_accounting(result, len(carrying))
+    if accounting:
+        lines.append("")
+        lines.extend(accounting)
+
+    lines.append("")
+    lines.extend(_WRITE_QUALIFIER.split("\n"))
+    lines.append("")
+    lines.extend(_REVIEWER_STATEMENT.split("\n"))
+    lines.append("")
+    lines.extend(_not_evaluated(result, standout, review_wide=True))
+    lines.append("")
+    lines.extend(_CLOSING_BRIDGE.split("\n"))
+    return "\n".join(lines) + "\n"
 
 
 def render_scan(result: Dict[str, Any]) -> str:
@@ -2331,8 +2544,8 @@ def render_scan(result: Dict[str, Any]) -> str:
             cross = _cross_project_pairs(mine)
             non_project = _non_project_pairs(mine)
             if cross:
-                lines.append("     targeted writes into %d other project%s"
-                             % (len(cross), "" if len(cross) == 1 else "s"))
+                lines.append("     " + (_CROSS_PHRASE_ONE if len(cross) == 1
+                                        else _CROSS_PHRASE_MANY))
             elif non_project:
                 lines.extend(_wrap_body(
                     "targeted %d write operations into locations where "
@@ -2367,6 +2580,12 @@ def render_scan(result: Dict[str, Any]) -> str:
 
     lines.append("")
     lines.extend(_not_evaluated(result, standout))
+    # The evidence path, named on the screen so it is never something the
+    # operator has to discover from CLI help (§4.1). Offered only when
+    # detail would show something.
+    if findings:
+        lines.append("")
+        lines.append(_DETAIL_CONTINUATION)
     lines.append("")
     lines.extend(_CLOSING_BRIDGE.split("\n"))
     lines.append("")

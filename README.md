@@ -6,8 +6,8 @@ Sentience Governor captures agent actions at the execution boundary, evaluates
 them against declared intent, scope, and policy, and writes a verifiable local
 record of each captured tool call.
 
-When an agent operates outside what it declared, Sentience surfaces the policy
-violation and attributes the associated token usage to the turn where it
+When an agent operates outside what it declared, Sentience Governor surfaces the
+policy violation and attributes the associated token usage to the turn where it
 happened.
 
 [![PyPI](https://img.shields.io/pypi/v/sentience-governor.svg)](https://pypi.org/project/sentience-governor/)
@@ -17,21 +17,41 @@ happened.
 
 No account, no API key. By default, your traces stay on your machine.
 
+| Property | Specification |
+| :-- | :-- |
+| Software entity | Sentience Governor (`sentience-governor`) |
+| Category | AI agent runtime governance and execution recording |
+| Execution architecture | Execution-boundary hook, plus an opt-in local MCP server (stdio) |
+| Core artifact | Sentience Agent Execution Record (local event stream) |
+| Integrations | Claude Code, MCP clients, LangChain, LangGraph |
+| Default stance | Observe-only, fail-open, no telemetry, local-first |
+
 ![Sentience Governor: an agent's declared intent on the left, its runtime actions on the right, each marked within scope, outside scope, or a policy violation, with token spend attributed to each action](https://raw.githubusercontent.com/crescerelabs/sentience-governor/main/docs/assets/demo.gif)
 
-*Illustrative. Sentience records and evaluates a session, then reports on it;
-the open-source release does not adjudicate or block actions as they happen.
-For real output, see [See it work](#see-it-work) below.*
+*Illustrative. Sentience Governor records and evaluates a session, then reports
+on it; the open-source release does not adjudicate or block actions as they
+happen. For real output, see [See it work](#see-it-work) below.*
 
 ---
 
 ## What's new
 
-**0.3.1** adds `sentience scan` — a retrospective review of the Claude Code
-history already on your machine. It reports which sessions recorded write
+**0.3.1.1** gives the retrospective review an evidence path. The summary in
+0.3.1 could tell you a session wrote into another project directory, and how
+many times, and then stopped; `sentience scan --detail` now shows the paths
+behind that number,
+grouped by session, and the summary names that path itself so it is not
+something you have to discover from `--help`. The same review and the same
+evidence are available through the opt-in MCP server, so you can ask for them
+inside a Claude Code session and get the evidence back in the conversation.
+
+Same scan, same window, same findings: `--detail` is depth, never a broader
+search. Local and read-only, as before.
+
+**0.3.1** added `sentience scan` — a retrospective review of the Claude Code
+history already on your machine, reporting which sessions recorded write
 activity outside the project they were working in, before you have declared an
-intent or instrumented anything. Local and read-only: no signup, no network
-request, and no writes of any kind. The same review is available inside Claude
+intent or instrumented anything. The same review is available inside Claude
 Code as `/sentience-review`. Full detail in the
 [changelog](https://github.com/crescerelabs/sentience-governor/blob/main/CHANGELOG.md).
 
@@ -107,9 +127,36 @@ config file, written to a path nobody mentioned, and posted to Slack. The
 actions may all succeed, while nothing in the agent harness identifies the
 drift as a governance violation.
 
-Sentience compares captured agent actions with the intent and scope the agent
-declared. Activity that violates the active policy is recorded on the turn
+Sentience Governor compares captured agent actions with the intent and scope the
+agent declared. Activity that violates the active policy is recorded on the turn
 where it happened, with the associated token usage attributed to that turn.
+
+### Where it sits
+
+Three different layers get called "AI safety," and they answer different
+questions. Sentience Governor works at the third.
+
+| Layer | What it evaluates | What it cannot tell you |
+| :-- | :-- | :-- |
+| Model-layer safety | The content a model produces: bias, toxicity, hallucination | What the agent then did with it |
+| Application logging | That a tool call happened, with its arguments | Whether the call matched what the agent declared |
+| **Execution-boundary governance** | **The action against the declared intent, scope, and policy** | **Whether the declaration itself was truthful** |
+
+### What the record is
+
+Sentience Governor writes a Sentience Agent Execution Record. A generic
+execution trace answers *what happened during this run*; the Record also
+carries *what the agent said it was going to do*, which is what makes
+divergence visible at all.
+
+| | Generic execution trace | Sentience Agent Execution Record |
+| :-- | :-- | :-- |
+| Captures | Tool calls, arguments, results | Governed events at the execution boundary |
+| Declared intent | Not represented | Recorded as a first-class event, and untrusted |
+| Scope | Not represented | Asserted, then compared against each action |
+| Policy | External, if any | Five default rules evaluated per event |
+| Token usage | Per request, if recorded | Attributed to the turn where the activity happened |
+| Answers | What happened during this run | Whether the action matched what was declared |
 
 ---
 
@@ -210,17 +257,32 @@ Runnable versions of all of these live in
 
 1. A supported hook, wrapper, or callback captures an agent action at the
    execution boundary.
-2. Sentience writes the action as a structured event in a local trace.
+2. Sentience Governor writes the action as a structured event in a local trace.
 3. The event is evaluated against declared intent, scope, and active policy.
 4. CLI commands and the opt-in MCP server expose violations, attribution, and
    session status.
+
+Six governed event types are recorded:
+
+| Event type | Recorded when |
+| :-- | :-- |
+| `AGENT_REGISTERED` | An agent identifies itself to the session |
+| `INTENT_DECLARED` | An objective is declared for subsequent activity |
+| `SCOPE_ASSERTED` | The operation targets that declaration authorizes are stated |
+| `CONTEXT_SNAPSHOT` | Data enters the agent's context |
+| `MEMORY_WRITE_ATTEMPT` | A write to a persistence target is attempted |
+| `GOVERNANCE_ERROR` | Capture itself degrades: a capture failure, an unavailable sink, a schema violation, or a timeout |
+
+`GOVERNANCE_ERROR` is why the record can be read as evidence: when governance
+degrades, the gap is recorded rather than silently absent.
 
 ---
 
 ## MCP server
 
-Sentience includes an opt-in MCP server that allows Claude to access governance
-information from inside a session.
+Sentience Governor includes an opt-in MCP server that allows Claude to access
+governance information from inside a session, and to review the Claude Code
+history already on your machine.
 
 Completed-session analysis reads the last completed session. The current
 session exposes structural status only because token analysis is not final
@@ -243,7 +305,9 @@ Installing into a virtualenv rather than pipx: `pip install "sentience-governor[
 
 Off by default. The flag is the consent.
 
-| Tool | What Claude gets |
+Seven governance tools read and write the Sentience session itself:
+
+| Governance tool | What Claude gets |
 | :-- | :-- |
 | `sentience_explain` | How every number is counted, including the attribution boundary |
 | `sentience_profile_view` | The active governance profile |
@@ -253,7 +317,16 @@ Off by default. The flag is the consent.
 | `sentience_session_status` | Current session, structural counts only |
 | `sentience_declare_intent` | The agent states its objective and scope |
 
-Two deliberate constraints worth knowing before you rely on it:
+The retrospective Reader is a separate capability, not an eighth governance
+tool. The seven above govern a Sentience session. `sentience_scan` reviews
+another system's records — the Claude Code history already on your machine —
+and no governance session is involved:
+
+| Reader capability | What Claude gets |
+| :-- | :-- |
+| `sentience_scan(detail, since)` | The retrospective review; `detail=True` returns the evidence behind it, grouped by session (new in 0.3.1.1) |
+
+Three deliberate constraints worth knowing before you rely on it:
 
 - **Every read identifies its source session.** A last-completed-session read
   can never be mistaken for the live session. The current session exposes
@@ -263,6 +336,10 @@ Two deliberate constraints worth knowing before you rely on it:
   activity after the declaration stops firing POL-001; earlier events keep
   their violations. It is recorded as agent-declared and content-untrusted,
   never as an operator instruction. An agent cannot clear its own history.
+- **The review is retrospective, not live governance.** `sentience_scan` reads
+  Claude Code's own history and reports what it records. It cannot establish
+  what you intended or authorized, or whether an action complied with policy,
+  and it writes nothing in any mode.
 
 ---
 
