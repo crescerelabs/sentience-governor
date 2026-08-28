@@ -318,6 +318,223 @@ def declare_intent_payload(
 
 
 # ---------------------------------------------------------------------------
+# Retrospective review (v0.3.1.1 §5) — the Reader's evidence over MCP.
+#
+# ONE capability with progressive disclosure, not two tools. The summary and
+# the evidence are two shapes of the SAME `retro.scan` result the CLI renders,
+# so neither surface can discover a finding the other lacks: whatever differs
+# is presentation. Read-only in every mode.
+# ---------------------------------------------------------------------------
+
+# User-facing vocabulary. `cross_project`, `non_project` and `claude_config`
+# are Reader's internal finding classes; they must never reach a client.
+_KIND_ANOTHER_PROJECT = "another_project"
+_KIND_NO_IDENTIFIABLE_PROJECT = "no_identifiable_project"
+_KIND_GLOBAL_CONFIGURATION = "global_configuration"
+
+# The same limitation the CLI prints, as one string rather than wrapped
+# terminal lines. Carried in every successful return: a client that renders
+# the findings without it would be presenting a review as a verdict.
+_SCAN_LIMITS = (
+    "Reader is a retrospective reviewer, not live governance. It cannot "
+    "establish what you intended or authorized, or whether an action "
+    "complied with policy."
+)
+
+# Neutral by construction: states the selection fact and nothing else. Never
+# safe, normal or unimportant.
+_NOT_STANDOUT_NOTE = "Did not meet Reader's standout criteria."
+
+_NO_FINDINGS_NOTE = (
+    "Not a statement that they were clean. Reader reports only what it can "
+    "classify, and did not evaluate shell commands."
+)
+
+
+def _iso_date(value: Optional[str]) -> Optional[str]:
+    """The calendar date of an ISO timestamp, or None when unknown."""
+    return value[:10] if value else None
+
+
+def _scan_groups(mine: List[Any], home: str, detail: bool) -> List[Dict[str, Any]]:
+    """One session's findings as evidence groups, in the CLI's order.
+
+    Config first (rank 1), then each destination project strongest first,
+    then the unidentifiable locations. Findings arrive in `rank_findings`
+    order and are never reordered here, so a group's targets carry the
+    shipped ranking rather than one invented for MCP.
+    """
+    from sentience_governor.analyze.renderers import (
+        _abbrev,
+        _relative_to,
+        _representative_locations,
+    )
+
+    def targets(findings: List[Any], root: str = "") -> List[Dict[str, Any]]:
+        return [{"path": (_relative_to(f.target, root) if root
+                          else _abbrev(f.target, home)),
+                 "write_operations": f.op_count}
+                for f in findings]
+
+    groups: List[Dict[str, Any]] = []
+
+    config = [f for f in mine if f.finding_class == "claude_config"]
+    if config:
+        group = {"kind": _KIND_GLOBAL_CONFIGURATION,
+                 "write_operations": sum(f.op_count for f in config)}
+        if detail:
+            group["targets"] = targets(config)
+        groups.append(group)
+
+    cross = [f for f in mine if f.finding_class == "cross_project"]
+    if cross:
+        # Subgrouped by the destination root Reader already recorded. No
+        # aggregate destination-project count is emitted anywhere: `dest_root`
+        # makes one calculable, but Reader does not claim it (§4.5).
+        roots: Dict[str, List[Any]] = {}
+        for finding in cross:
+            roots.setdefault(finding.dest_root, []).append(finding)
+        ordered = sorted(
+            roots.items(),
+            key=lambda item: (-sum(f.op_count for f in item[1]), item[0]),
+        )
+        for root, items in ordered:
+            group = {"kind": _KIND_ANOTHER_PROJECT,
+                     "destination": _abbrev(root, home),
+                     "write_operations": sum(f.op_count for f in items)}
+            if detail:
+                group["targets"] = targets(items, root=root)
+            groups.append(group)
+
+    unidentified = [f for f in mine if f.finding_class == "non_project"]
+    if unidentified:
+        # Operation volume only. Never a count of distinct targets,
+        # destinations, locations, trees or projects: descendants of one old
+        # tree would inflate a number Reader cannot know (§2.5).
+        group = {"kind": _KIND_NO_IDENTIFIABLE_PROJECT,
+                 "write_operations": sum(f.op_count for f in unidentified)}
+        if detail:
+            group["targets"] = targets(unidentified)
+        else:
+            group["representative"] = _representative_locations(
+                unidentified, home)
+        groups.append(group)
+
+    return groups
+
+
+def _scan_session(session_id: str, findings: List[Any], labels: Dict[str, Any],
+                  home: str, detail: bool) -> Dict[str, Any]:
+    """One session block: label, where it worked, and its evidence groups."""
+    from sentience_governor.analyze.renderers import _abbrev
+
+    mine = [f for f in findings if f.session_id == session_id]
+    entry = labels.get(session_id) or {}
+    block: Dict[str, Any] = {
+        "session": entry.get("label") or session_id[:8],
+    }
+    source_root = next((f.source_root for f in mine if f.source_root), "")
+    if source_root:
+        # Omitted rather than empty when unresolved: a blank working
+        # directory would read as a claim that there was none.
+        block["working_in"] = _abbrev(source_root, home)
+    block["groups"] = _scan_groups(mine, home, detail)
+    return block
+
+
+def scan_payload(
+    detail: bool = False,
+    since: str = "all",
+    *,
+    root: Optional[os.PathLike] = None,
+    now: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    """The retrospective review as structured data (v0.3.1.1 §5.3/§5.4).
+
+    ``root`` / ``now`` are injectable for testing. Performs no writes in any
+    mode, and performs no scan at all when ``since`` is invalid.
+    """
+    from sentience_governor import retro
+
+    # Validated BEFORE the scan, following the `declare_intent` precedent:
+    # a status dictionary rather than an exception, so a client already
+    # handling `invalid_request` from one tool handles it from this one.
+    # Checking first is what makes "no scan is performed" true, not merely
+    # "nothing is written".
+    if not isinstance(since, str) or since not in retro._SINCE_CHOICES:
+        return {
+            "status": "invalid_request",
+            "detail": "since must be one of %s" % ", ".join(retro._SINCE_CHOICES),
+        }
+
+    detail = bool(detail)
+    result = retro.scan(root, since=since, now=now)
+
+    findings = list(result.get("findings") or [])
+    labels = result.get("session_labels") or {}
+    home = result.get("_home") or ""
+    standout = list(result.get("sessions_with_findings") or [])
+    ranked = list(result.get("_ranked_sessions") or standout)
+    carrying = [sid for sid in ranked
+                if any(f.session_id == sid for f in findings)]
+
+    payload: Dict[str, Any] = {
+        "status": "ok",
+        "reviewed": {
+            "sessions": result.get("sessions", 0),
+            "period_start": _iso_date(result.get("period_start")),
+            "period_end": _iso_date(result.get("period_end")),
+            "read_only": True,
+        },
+        "standout": [_scan_session(sid, findings, labels, home, detail)
+                     for sid in standout],
+    }
+
+    if detail:
+        payload["other_reviewed"] = [
+            dict(_scan_session(sid, findings, labels, home, detail),
+                 note=_NOT_STANDOUT_NOTE)
+            for sid in carrying if sid not in standout
+        ]
+        payload["sessions_without_findings"] = {
+            "count": max(0, result.get("sessions", 0) - len(carrying)),
+            "note": _NO_FINDINGS_NOTE,
+        }
+    else:
+        # Computed from the findings themselves, NOT from the shipped
+        # `sessions_with_findings` field, which holds standout session IDs
+        # (§2.2). The distinct name keeps two definitions of one field name
+        # out of the product.
+        payload["sessions_carrying_findings"] = len(
+            {f.session_id for f in findings})
+
+    payload["not_evaluated"] = {
+        "shell_commands": result.get("shell_calls", 0),
+        "prompt_content": "never inspected",
+        "oversize_records_skipped": result.get("lines_oversize", 0),
+        "auto_maintained_records_suppressed": sum(
+            (result.get("suppressed") or {}).values()),
+    }
+    payload["limits"] = _SCAN_LIMITS
+
+    if detail:
+        # Always present in detail, at zero as well, so a client can disclose
+        # truncation without inferring it. The CLI stays silent at zero
+        # (§4.6): a presentational divergence, not a semantic one.
+        payload["bounded"] = {
+            "findings_omitted": result.get("findings_omitted", 0),
+            "targets_omitted": result.get("targets_omitted", 0),
+        }
+    else:
+        # How a client learns a continuation exists without the human having
+        # to know one does. The MCP counterpart of the CLI's `Inspect the
+        # evidence` line.
+        payload["detail_available"] = bool(findings)
+
+    return payload
+
+
+# ---------------------------------------------------------------------------
 # MCP server — thin registration over the payloads (requires optional `mcp`).
 # ---------------------------------------------------------------------------
 
@@ -414,6 +631,20 @@ def build_server() -> Any:
         mismatched scope still trips a scope-intent mismatch.
         """
         return declare_intent_payload(objective, scope)
+
+    @server.tool()
+    def sentience_scan(
+        detail: bool = False, since: str = "all"
+    ) -> Dict[str, Any]:
+        """Review the Claude Code history already on this machine for
+        project-boundary write activity. Retrospective and read-only: it reads
+        another system's history, records nothing, and performs zero writes.
+        Returns the review summary; pass `detail=True` for the evidence behind
+        it, grouped by session. `since` accepts `7d`, `30d` or `all`. It cannot
+        establish what the user intended or authorized, or whether an action
+        complied with policy.
+        """
+        return scan_payload(detail=detail, since=since)
 
     return server
 
