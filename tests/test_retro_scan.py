@@ -1163,7 +1163,9 @@ def test_52_state_one_is_the_hero_screen(config_root, home):
     assert "One session stands out." in rendered
     assert '"Alpha work"' in rendered
     assert "working in  ~/repo-src" in rendered
-    assert "Claude targeted writes into another project:" in rendered
+    assert "Claude targeted writes into another project directory:" in rendered
+    # Screen A wording: destination rows read "write operations", not "ops".
+    assert "write operations" in rendered
     # Resolver-honest wording, never "outside any project", and reported
     # as operation volume rather than an inferred count of locations.
     assert ("and 1 write operations targeted locations where Reader"
@@ -1965,3 +1967,35 @@ class TestDetailCliSurface:
             summary_ids = {f.session_id for f in result["findings"]}
             assert summary_ids == {"s"}
             assert '"s"' in render_scan_detail(result) or "s" in render_scan_detail(result)
+
+
+class TestSummaryWordingMatchesScreenA:
+    """v0.3.1.1 §4.3/§4.5 — the summary and the evidence view use one
+    vocabulary; neither says "projects" while the other says "project
+    directories", and neither claims a destination count."""
+
+    def test_summary_uses_the_pinned_singular_heading(self, config_root, home):
+        rendered = render_scan(_cross_result(config_root, home))
+        assert "Claude targeted writes into another project directory:" in rendered
+        assert "into another project:" not in rendered
+
+    def test_summary_uses_the_pinned_plural_heading_without_a_count(
+        self, config_root, home
+    ):
+        result = _cross_result(config_root, home, dests=("repo-b", "repo-c"))
+        rendered = render_scan(result)
+        assert "Claude targeted writes into other project directories:" in rendered
+        for forbidden in ("into 2 other projects", "2 projects"):
+            assert forbidden not in rendered
+
+    def test_destination_rows_say_write_operations(self, config_root, home):
+        rendered = render_scan(_cross_result(config_root, home))
+        assert "1 write operation" in rendered
+        assert " ops" not in rendered
+        assert " op\n" not in rendered
+
+    def test_summary_and_detail_share_the_heading(self, config_root, home):
+        result = _cross_result(config_root, home)
+        heading = "Claude targeted writes into another project directory:"
+        assert heading in render_scan(result)
+        assert heading in render_scan_detail(result)

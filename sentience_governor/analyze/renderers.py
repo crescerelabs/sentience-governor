@@ -2034,6 +2034,12 @@ _LIST_CAPTION = "Showing the strongest retrospective findings first."
 _MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun",
            "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 
+# Two pinned forms, no other variation (§4.5), shared by the summary and
+# the detail view. Reader knows the destination roots, so plurality here
+# is grammar, not an aggregate project count.
+_CROSS_ONE = "Claude targeted writes into another project directory:"
+_CROSS_MANY = "Claude targeted writes into other project directories:"
+
 _DEST_ROWS_CAP = 10          # per-session destination rows (§8.4)
 _DETAIL_SESSIONS = 3         # State N: detail for the strongest few
 _BODY_WIDTH = 52
@@ -2076,8 +2082,8 @@ def _dest_rows(pairs: List[tuple], home: str) -> List[str]:
     rows = []
     for path, count in ordered[:_DEST_ROWS_CAP]:
         label = _abbrev(path, home)
-        rows.append("    " + label.ljust(28) + "%4d %s" % (
-            count, "op" if count == 1 else "ops"))
+        rows.append("    " + label.ljust(28) + "%4d write operation%s" % (
+            count, "" if count == 1 else "s"))
     remaining = len(ordered) - _DEST_ROWS_CAP
     if remaining > 0:
         rows.append("    … and %d more destinations" % remaining)
@@ -2168,11 +2174,11 @@ def _session_block(session_id: str, findings: List, labels: Dict,
 
     if cross:
         lines.append("")
-        if len(cross) == 1:
-            lines.append("  Claude targeted writes into another project:")
-        else:
-            lines.append(
-                "  Claude targeted writes into %d other projects:" % len(cross))
+        # The two pinned forms (§4.5), shared with the detail view so one
+        # screen never says "project directory" and the other "projects".
+        # Grammatical agreement only: no aggregate destination count, which
+        # `dest_root` makes calculable but which Reader does not claim.
+        lines.append("  " + (_CROSS_ONE if len(cross) == 1 else _CROSS_MANY))
         lines.append("")
         lines.extend(_dest_rows(cross, home))
 
@@ -2293,11 +2299,6 @@ _OTHER_SECTION_NOTE = (
     "These sessions did not meet Reader's standout criteria. They\n"
     "are included because this view shows the reviewed findings."
 )
-
-# Two pinned forms, no other variation (§4.5). Reader knows the destination
-# roots, so plurality here is grammar, not an aggregate project count.
-_CROSS_ONE = "Claude targeted writes into another project directory:"
-_CROSS_MANY = "Claude targeted writes into other project directories:"
 
 _CONFIG_HEADING = "Claude targeted writes to its global configuration:"
 
