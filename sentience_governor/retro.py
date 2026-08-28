@@ -786,6 +786,11 @@ def scan(
         "outside_cwd_secondary": outside_cwd_secondary,
         "same_project_writes": same_project_writes,
         "sessions_with_findings": ranked_sessions,
+        # Private renderer metadata beside ``_home``, NOT part of the §3.2
+        # public contract: every session carrying findings, in shipped
+        # ranked order, so the detail view can render the non-standout
+        # sections without reimplementing the ordering.
+        "_ranked_sessions": rank_sessions(findings, session_labels),
         "findings": findings,
         "findings_omitted": findings_omitted,
         "targets_omitted": targets_omitted,

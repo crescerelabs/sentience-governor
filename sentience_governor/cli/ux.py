@@ -2739,12 +2739,19 @@ def run_scan(args: argparse.Namespace) -> int:
     asterisk at the exact moment the product is asking to be trusted.
     """
     from sentience_governor import retro
-    from sentience_governor.analyze.renderers import render_scan
+    from sentience_governor.analyze.renderers import (
+        render_scan, render_scan_detail,
+    )
 
     result = retro.scan(since=getattr(args, "since", "all"))
 
     if getattr(args, "json", False):
         print(json.dumps(retro.json_payload(result), indent=2, sort_keys=False))
+        return 0
+
+    # Same scan, same window, same result — only the presentation differs.
+    if getattr(args, "detail", False):
+        print(render_scan_detail(result))
         return 0
 
     print(render_scan(result))
@@ -3226,7 +3233,19 @@ def main() -> int:
             "the whole history is the point; 7d/30d narrow it."
         ),
     )
-    p_scan.add_argument(
+    # Mutually exclusive by construction: `--detail` is new and carries no
+    # compatibility burden, so an ambiguous invocation is refused with
+    # standard argparse usage output rather than silently resolved.
+    p_scan_mode = p_scan.add_mutually_exclusive_group()
+    p_scan_mode.add_argument(
+        "--detail",
+        action="store_true",
+        help=(
+            "Show the evidence behind the retrospective review, grouped "
+            "by session."
+        ),
+    )
+    p_scan_mode.add_argument(
         "--json",
         action="store_true",
         help="Emit the structured aggregate instead of the report.",
