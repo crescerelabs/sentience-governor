@@ -322,6 +322,28 @@ class TestKindVocabulary:
         [group] = payload["standout"][0]["groups"]
         assert group["kind"] == "global_configuration"
 
+    def test_config_findings_carry_no_trace_of_their_internal_class(
+        self, config_root, home
+    ):
+        """The mapping and its guard, over a corpus that actually holds a
+        `claude_config` finding.
+
+        `test_internal_class_names_never_appear` sweeps a corpus with no
+        config finding in it, so it proves absence where the string was
+        never at risk. This is the case where the translation has to
+        happen: in both modes, `global_configuration` appears and
+        `claude_config` does not.
+        """
+        source = git_repo(home, "repo-a")
+        install(config_root, [activity("s", cwd=str(source), tools=[
+            write_block(home / ".claude" / "settings.json"),
+            write_block(home / ".claude" / "hooks" / "post.sh")])])
+        for detail in (False, True):
+            payload = scan_payload(detail=detail, root=config_root)
+            kinds = [g["kind"] for g in payload["standout"][0]["groups"]]
+            assert kinds == ["global_configuration"]
+            assert "claude_config" not in json.dumps(payload)
+
     def test_config_group_is_rendered_first_within_its_session(
         self, config_root, home
     ):
