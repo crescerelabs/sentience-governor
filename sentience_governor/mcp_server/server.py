@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import os
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from sentience_governor.analyze.methodology import build_methodology
 from sentience_governor.analyze.policy_violation_burn_rate import (
@@ -350,19 +350,92 @@ _NO_FINDINGS_NOTE = (
     "classify, and did not evaluate shell commands."
 )
 
+# Per-session finding state (v0.3.1.2 §4.2). A three-state enum rather than a
+# nullable boolean: `findings_omitted` is a global counter, so a session whose
+# findings were all dropped by the display bound would present as having none.
+# A client treating JSON null as falsy would silently convert "cannot be
+# established" into "no findings"; an explicit enum cannot be collapsed by
+# accident. None of the three values says anything about WHY.
+_FINDINGS_PRESENT = "present"
+_FINDINGS_ABSENT = "absent"
+_FINDINGS_UNKNOWN = "unknown"
+
 
 def _iso_date(value: Optional[str]) -> Optional[str]:
     """The calendar date of an ISO timestamp, or None when unknown."""
     return value[:10] if value else None
 
 
-def _scan_groups(mine: List[Any], home: str, detail: bool) -> List[Dict[str, Any]]:
+def _findings_state(session_id: str, retained: Set[str],
+                    findings_omitted: int) -> str:
+    """Which of the three finding states holds for one session (§4.2).
+
+    The order of the tests is load-bearing. A global bound clouds a negative
+    but never erases a positive: if collection was bounded and this session
+    still holds a retained finding, Reader knows a finding exists and must
+    say so. Only the absence case is weakened by the bound.
+    """
+    if session_id in retained:
+        return _FINDINGS_PRESENT
+    if findings_omitted == 0:
+        return _FINDINGS_ABSENT
+    return _FINDINGS_UNKNOWN
+
+
+def _session_activity(result: Dict[str, Any], findings: List[Any],
+                      labels: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """What Reader observed per session, for every session in the window.
+
+    Reads counters `retro.scan` already computed; no new analysis. Sorted by
+    the stable session identifier and by nothing else — sorting by activity
+    volume or finding count would reintroduce an importance ordering through
+    the back door. **Array position carries no meaning.** `standout[]` remains
+    the only place expressing which sessions stood out.
+
+    Counters are Reader-observable, not claims about the session: 0 means
+    Reader observed no counted activity of that kind in the transcript, which
+    is not the same as nothing having happened. `shell_calls` counts shell
+    TOOL INVOCATIONS, never commands — one invocation can carry a compound
+    command, a pipeline or a script, and Reader does not interpret Bash.
+    """
+    by_session = result.get("by_session") or {}
+    findings_omitted = result.get("findings_omitted", 0)
+    # Retained findings only. `findings` is already truncated by the display
+    # bound when it arrives here, which is precisely why the third state
+    # exists rather than a boolean.
+    retained = {f.session_id for f in findings}
+
+    rows: List[Dict[str, Any]] = []
+    for session_id in sorted(by_session):
+        counts = by_session[session_id] or {}
+        entry = labels.get(session_id) or {}
+        rows.append({
+            # The correlation key. The full existing session id — already in
+            # the shipped `--json` contract — because display labels are not
+            # unique: two sessions given the same custom title produce
+            # byte-identical labels and nothing dedupes them.
+            "session_id": session_id,
+            "session": entry.get("label") or session_id[:8],
+            "tool_calls": counts.get("tool_calls", 0),
+            "file_operations": counts.get("file_ops", 0),
+            "shell_calls": counts.get("shell_calls", 0),
+            "retrospective_findings": _findings_state(
+                session_id, retained, findings_omitted),
+        })
+    return rows
+
+
+def _scan_groups(mine: List[Any], home: str, detail: bool,
+                 counts_exact: bool = True) -> List[Dict[str, Any]]:
     """One session's findings as evidence groups, in the CLI's order.
 
     Config first (rank 1), then each destination project strongest first,
     then the unidentifiable locations. Findings arrive in `rank_findings`
     order and are never reordered here, so a group's targets carry the
     shipped ranking rather than one invented for MCP.
+
+    ``counts_exact`` is the §4.3 condition-2 state: whether BOTH collection
+    and display bounds were clear for this scan. It decides `target_count`.
     """
     from sentience_governor.analyze.renderers import (
         _abbrev,
@@ -401,16 +474,38 @@ def _scan_groups(mine: List[Any], home: str, detail: bool) -> List[Dict[str, Any
         for root, items in ordered:
             group = {"kind": _KIND_ANOTHER_PROJECT,
                      "destination": _abbrev(root, home),
+                     # A plain, unmarked integer, computed from the same
+                     # truncated array as `target_count` and short by the
+                     # same amount under a bound. That is shipped behavior
+                     # this release deliberately does not change (issue #11,
+                     # §6.1): pinned as known, not silently repaired.
                      "write_operations": sum(f.op_count for f in items)}
             if detail:
                 group["targets"] = targets(items, root=root)
+            else:
+                # §4.3. Permitted here and only here: Reader resolved this
+                # destination root and holds the files inside it, so counting
+                # them is not the inference the no-aggregate rule bars. One
+                # finding is one normalized target — `retro.py:735` keys by
+                # (session, class, target) and sums `op_count` — so the
+                # length IS the distinct-target count.
+                #
+                # `null` rather than omitted under a bound: omitting it would
+                # make a bounded cross-project group indistinguishable from a
+                # non-project group, which is the barred inference wearing an
+                # absent field. The two carry different facts — "cannot be
+                # answered here" versus "may never be asked here".
+                group["target_count"] = len(items) if counts_exact else None
             groups.append(group)
 
     unidentified = [f for f in mine if f.finding_class == "non_project"]
     if unidentified:
         # Operation volume only. Never a count of distinct targets,
         # destinations, locations, trees or projects: descendants of one old
-        # tree would inflate a number Reader cannot know (§2.5).
+        # tree would inflate a number Reader cannot know (§2.5). `target_count`
+        # is absent here under EVERY bound state — this group kind is defined
+        # by Reader not identifying a project, which is the case the rule
+        # exists for, so the count is not merely unavailable but unsupported.
         group = {"kind": _KIND_NO_IDENTIFIABLE_PROJECT,
                  "write_operations": sum(f.op_count for f in unidentified)}
         if detail:
@@ -424,13 +519,21 @@ def _scan_groups(mine: List[Any], home: str, detail: bool) -> List[Dict[str, Any
 
 
 def _scan_session(session_id: str, findings: List[Any], labels: Dict[str, Any],
-                  home: str, detail: bool) -> Dict[str, Any]:
+                  home: str, detail: bool,
+                  counts_exact: bool = True) -> Dict[str, Any]:
     """One session block: label, where it worked, and its evidence groups."""
     from sentience_governor.analyze.renderers import _abbrev
 
     mine = [f for f in findings if f.session_id == session_id]
     entry = labels.get(session_id) or {}
     block: Dict[str, Any] = {
+        # The correlation key (§4.2), the ONLY thing this release adds to a
+        # detail-payload object: no activity counters and no finding state
+        # cross that boundary. It guarantees exactly one thing — where a
+        # session occurs in two responses, it is the same session. Not
+        # presence, not stable counters, not stable ranking: the two calls
+        # are independent scans over a corpus that grows.
+        "session_id": session_id,
         "session": entry.get("label") or session_id[:8],
     }
     source_root = next((f.source_root for f in mine if f.source_root), "")
@@ -438,7 +541,7 @@ def _scan_session(session_id: str, findings: List[Any], labels: Dict[str, Any],
         # Omitted rather than empty when unresolved: a blank working
         # directory would read as a claim that there was none.
         block["working_in"] = _abbrev(source_root, home)
-    block["groups"] = _scan_groups(mine, home, detail)
+    block["groups"] = _scan_groups(mine, home, detail, counts_exact)
     return block
 
 
@@ -470,6 +573,19 @@ def scan_payload(
     detail = bool(detail)
     result = retro.scan(root, since=since, now=now)
 
+    # §4.3 condition 2. TWO independent counters can each shorten a group's
+    # target list, and they fire at different thresholds: MAX_TARGETS
+    # (10,000 distinct collection keys) records `targets_omitted`, while
+    # MAX_DISPLAY_FINDINGS (500) records `findings_omitted` and then
+    # truncates the very array this payload is built from
+    # (`retro.py:766-767`). Any corpus between the two sits in the gap —
+    # 700 distinct cross-project targets in one session yields
+    # `targets_omitted: 0`, `findings_omitted: 200` and 500 retained — so a
+    # rule consulting only the collection bound would emit an exact-looking
+    # integer short by 200. Both must be clear.
+    counts_exact = (result.get("targets_omitted", 0) == 0
+                    and result.get("findings_omitted", 0) == 0)
+
     findings = list(result.get("findings") or [])
     labels = result.get("session_labels") or {}
     home = result.get("_home") or ""
@@ -486,13 +602,15 @@ def scan_payload(
             "period_end": _iso_date(result.get("period_end")),
             "read_only": True,
         },
-        "standout": [_scan_session(sid, findings, labels, home, detail)
+        "standout": [_scan_session(sid, findings, labels, home, detail,
+                                   counts_exact)
                      for sid in standout],
     }
 
     if detail:
         payload["other_reviewed"] = [
-            dict(_scan_session(sid, findings, labels, home, detail),
+            dict(_scan_session(sid, findings, labels, home, detail,
+                               counts_exact),
                  note=_NOT_STANDOUT_NOTE)
             for sid in carrying if sid not in standout
         ]
@@ -501,10 +619,16 @@ def scan_payload(
             "note": _NO_FINDINGS_NOTE,
         }
     else:
+        # Summary only (§4.4). Detail already names every session carrying a
+        # finding and carries `bounded`; what it lacks is the sessions that
+        # carry none, and those are exactly what this array supplies.
+        payload["session_activity"] = _session_activity(
+            result, findings, labels)
         # Computed from the findings themselves, NOT from the shipped
         # `sessions_with_findings` field, which holds standout session IDs
         # (§2.2). The distinct name keeps two definitions of one field name
-        # out of the product.
+        # out of the product. Now derivable from `session_activity` by
+        # counting `present`; it stays because it is a shipped field.
         payload["sessions_carrying_findings"] = len(
             {f.session_id for f in findings})
 

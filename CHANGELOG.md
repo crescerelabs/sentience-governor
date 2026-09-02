@@ -5,6 +5,54 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.1.2] — 2026-09-01
+
+**Context for the review, over MCP.** The scan summary could say how many
+sessions carried findings without saying which ones, leaving the rest of the
+reviewed sessions named nowhere. A cross-project group could report its write
+operations without saying whether that was many edits to one file or one edit
+to many files. Both are answerable from the summary payload now, without
+asking for the full evidence.
+
+### Added
+- **`session_activity[]` on the `sentience_scan` summary** — one entry per
+  session in the review window, including sessions that carried no findings.
+  Each holds the tool, file and shell counters the scan already computes, plus
+  `retrospective_findings`: `present` when a finding for that session is
+  retained, `absent` when none is retained and nothing was omitted, and
+  `unknown` when none is retained but display omission means absence cannot be
+  established. A counter of zero means Reader observed no counted activity of
+  that kind, never that nothing happened. Array order is by session identifier
+  and carries no meaning; `standout[]` remains the only place that says which
+  sessions stood out.
+- **`session_id` on `session_activity[]`, `standout[]` and `other_reviewed[]`**
+  — the full identifier already present in `--json`, so a client can join a
+  summary response to a detail response. Session labels are display values and
+  are not unique: two sessions given the same custom title produce the same
+  label. The key guarantees only that a session appearing in both responses is
+  the same session. It does not guarantee that it appears in both, or that
+  counters or ranking are stable between them, because the two calls are
+  independent scans.
+- **`target_count` on cross-project groups** — how many distinct files the
+  group's write operations touched, which volume alone cannot tell you. It is
+  exact only when both of the scan's omission counters are zero
+  (`targets_omitted` and `findings_omitted`) and `null` when either is not,
+  because either bound can shorten a group's target list. It is absent rather
+  than null on `no_identifiable_project` groups: that kind is defined by no
+  project having been identified, so a count of distinct places there would be
+  a number Reader cannot know.
+
+### Notes
+- **Additive only.** The `sentience_scan` signature is unchanged, and so are
+  classification, ranking, which sessions stand out, the `--json` contract and
+  both `sentience scan` screens. No `schema_version` change, no migration.
+- **`write_operations` is unchanged, and still unmarked under a bound.** It is
+  computed from the same truncated data as `target_count` and is short by the
+  same amount when display omission occurs, but it carries no indication of
+  that. This release deliberately does not repair it; see issue #11.
+
+---
+
 ## [0.3.1.1] — 2026-08-28
 
 **The evidence behind the review.** 0.3.1 could tell you a session wrote into

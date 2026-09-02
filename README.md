@@ -36,6 +36,14 @@ happen. For real output, see [See it work](#see-it-work) below.*
 
 ## What's new
 
+**0.3.1.2** gives the review context when you ask for it inside Claude Code.
+The summary now names every session it reviewed, not just the ones that stood
+out, and says for each whether a finding was retained, was not, or cannot be
+established because the display was truncated. Cross-project findings say how
+many distinct files the writes touched, not just how many write operations
+there were, which is the difference between many edits to one file and one edit
+to many. Local and read-only, as before.
+
 **0.3.1.1** gives the retrospective review an evidence path. The summary in
 0.3.1 could tell you a session wrote into another project directory, and how
 many times, and then stopped; `sentience scan --detail` now shows the paths

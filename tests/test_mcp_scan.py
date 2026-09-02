@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -368,9 +369,37 @@ class TestNoAggregateCounts:
         # Each destination stands on its own; nothing sums them into a
         # "wrote into N projects" claim, which `dest_root` would make
         # calculable but which Reader does not assert.
+        #
+        # v0.3.1.2 adds `target_count` INSIDE a group — how many files in
+        # this one destination — which is a different quantity from how many
+        # destinations there were. The guard that matters is unchanged and
+        # tested below: no field sums across groups.
         for group in groups:
-            assert set(group) == {"kind", "destination", "write_operations"}
+            assert set(group) == {"kind", "destination", "write_operations",
+                                  "target_count"}
         assert "projects" not in json.dumps(payload)
+
+    def test_no_total_across_groups(self, config_root, home):
+        """§4.3 — summing a permitted count with a forbidden one yields a
+        number that inherits the forbidden one's dishonesty."""
+        source = git_repo(home, "repo-a")
+        other = git_repo(home, "repo-b")
+        scratch = home / "scratch"
+        scratch.mkdir(exist_ok=True)
+        install(config_root, [activity("s", cwd=str(source), tools=[
+            write_block(other / "a.txt"), write_block(other / "b.txt"),
+            write_block(scratch / "c.md")])])
+        payload = scan_payload(root=config_root)
+        session = payload["standout"][0]
+        assert set(session) <= {"session_id", "session", "working_in",
+                                "groups"}
+        # The cross-project group counts its own targets and stops there.
+        groups = {g["kind"]: g for g in session["groups"]}
+        assert groups["another_project"]["target_count"] == 2
+        assert "target_count" not in groups["no_identifiable_project"]
+        # Nothing at session or payload level adds them up.
+        assert not [key for key in session if "target" in key]
+        assert not [key for key in payload if "target" in key]
 
     def test_unidentifiable_group_is_volume_only(self, config_root, home):
         payload = scan_payload(root=mixed_corpus(config_root, home),
@@ -625,3 +654,571 @@ class TestToolRegistration:
         # And it says plainly what it cannot establish.
         assert "cannot establish what the user intended or authorized" in (
             description)
+
+
+# ---------------------------------------------------------------------------
+# v0.3.1.2 CP1 — per-session activity and the correlation key.
+# ---------------------------------------------------------------------------
+
+
+def bounded_corpus(config_root, home, *, findings=520):
+    """A corpus that trips the display bound, with a quiet session beside it.
+
+    `MAX_DISPLAY_FINDINGS` is 500, so `findings` distinct cross-project
+    targets in one session leaves `findings_omitted > 0` while that session
+    still holds retained findings. The quiet session holds none. Both states
+    therefore occur in ONE scan, which is the case §4.2's ordering exists for.
+    """
+    source = git_repo(home, "repo-a")
+    dest = git_repo(home, "repo-b")
+    records = [
+        activity("s-loud", cwd=str(source),
+                 tools=[write_block(dest / ("f%04d.txt" % i))
+                        for i in range(findings)]),
+        activity("s-quiet", cwd=str(source), tools=[shell_block("echo hi")]),
+    ]
+    install(config_root, records)
+    return config_root
+
+
+def titled(session_id: str, title: str) -> dict:
+    """The metadata record that gives a session a custom title."""
+    return {"type": "custom-title", "sessionId": session_id,
+            "customTitle": title}
+
+
+def duplicate_title_corpus(config_root, home, title="release pass"):
+    """Two sessions sharing one custom title (§3, §7.7).
+
+    `retro.py` assigns customTitle → slug → session-id prefix with no dedupe
+    step, so identical titles yield byte-identical labels. This is the case
+    that makes a correlation key necessary rather than convenient.
+    """
+    source = git_repo(home, "repo-a")
+    dest = git_repo(home, "repo-b")
+    records = [
+        titled("s-one", title),
+        titled("s-two", title),
+        activity("s-one", cwd=str(source), tools=[write_block(dest / "a.txt")]),
+        activity("s-two", cwd=str(source), tools=[write_block(dest / "b.txt")]),
+    ]
+    install(config_root, records)
+    return config_root
+
+
+def rows_by_id(payload):
+    return {row["session_id"]: row for row in payload["session_activity"]}
+
+
+class TestSessionActivity:
+    """§4.2 — every session in the window, not only the ones with findings.
+
+    Nine of eleven sessions on the real corpus are named nowhere in either
+    payload today. This array names them, reporting what Reader observed and
+    asserting no relationship between activity and findings.
+    """
+
+    def test_every_reviewed_session_appears_exactly_once(
+        self, config_root, home
+    ):
+        payload = scan_payload(root=mixed_corpus(config_root, home))
+        rows = payload["session_activity"]
+        assert len(rows) == payload["reviewed"]["sessions"] == 5
+        ids = [row["session_id"] for row in rows]
+        assert len(set(ids)) == len(ids)
+
+    def test_sessions_without_findings_are_included(self, config_root, home):
+        """The whole point: 3 of the 5 carry nothing and were previously
+        collapsed into an integer."""
+        payload = scan_payload(root=mixed_corpus(config_root, home))
+        quiet = [row for row in payload["session_activity"]
+                 if row["session_id"].startswith("s-quiet")]
+        assert len(quiet) == 3
+        for row in quiet:
+            assert row["retrospective_findings"] == "absent"
+            assert row["tool_calls"] == 1
+
+    def test_session_id_is_the_full_identifier_not_a_derivative(
+        self, config_root, home
+    ):
+        root = mixed_corpus(config_root, home)
+        result = retro.scan(root)
+        payload = scan_payload(root=root)
+        assert set(rows_by_id(payload)) == set(result["by_session"])
+
+    def test_counters_come_from_by_session_untransformed(
+        self, config_root, home
+    ):
+        root = mixed_corpus(config_root, home)
+        result = retro.scan(root)
+        rows = rows_by_id(scan_payload(root=root))
+        for session_id, counts in result["by_session"].items():
+            row = rows[session_id]
+            assert row["tool_calls"] == counts["tool_calls"]
+            assert row["file_operations"] == counts["file_ops"]
+            # Named for what Reader counts: shell TOOL INVOCATIONS. Equality
+            # with no transformation is the contract (§4.2).
+            assert row["shell_calls"] == counts["shell_calls"]
+
+    def test_the_shell_counter_is_not_called_commands(self, config_root, home):
+        """Reader does not interpret Bash, so it cannot count commands: one
+        invocation can carry a pipeline or a whole script."""
+        payload = scan_payload(root=mixed_corpus(config_root, home))
+        for row in payload["session_activity"]:
+            assert "shell_calls" in row
+            assert not [key for key in row if "command" in key]
+
+    def test_label_is_the_display_value_and_may_be_the_fallback(
+        self, config_root, home
+    ):
+        root = mixed_corpus(config_root, home)
+        result = retro.scan(root)
+        rows = rows_by_id(scan_payload(root=root))
+        for session_id, entry in result["session_labels"].items():
+            assert rows[session_id]["session"] == entry["label"]
+
+    def test_ordering_is_by_identifier_and_stable(self, config_root, home):
+        """Position carries no meaning. Sorting by volume or finding count
+        would be an importance ordering entering through the back door."""
+        root = mixed_corpus(config_root, home)
+        first = [row["session_id"]
+                 for row in scan_payload(root=root)["session_activity"]]
+        second = [row["session_id"]
+                  for row in scan_payload(root=root)["session_activity"]]
+        assert first == second == sorted(first)
+        # The busiest session is not hoisted: `s-standout` sorts where its
+        # identifier puts it, not where its three write operations would.
+        rows = scan_payload(root=root)["session_activity"]
+        assert rows[0]["session_id"] == "s-carrier"
+
+    def test_summary_only(self, config_root, home):
+        detail = scan_payload(detail=True, root=mixed_corpus(config_root, home))
+        assert "session_activity" not in detail
+
+
+class TestRetrospectiveFindingsEnum:
+    """§4.2 — three states, and the ORDER of the tests that produce them."""
+
+    def test_present_for_a_session_holding_a_retained_finding(
+        self, config_root, home
+    ):
+        payload = scan_payload(root=mixed_corpus(config_root, home))
+        rows = rows_by_id(payload)
+        assert rows["s-standout"]["retrospective_findings"] == "present"
+        assert rows["s-carrier"]["retrospective_findings"] == "present"
+
+    def test_absent_requires_no_retained_finding_and_no_omission(
+        self, config_root, home
+    ):
+        root = mixed_corpus(config_root, home)
+        assert retro.scan(root)["findings_omitted"] == 0
+        rows = rows_by_id(scan_payload(root=root))
+        assert rows["s-quiet-0"]["retrospective_findings"] == "absent"
+
+    def test_unknown_when_nothing_is_retained_under_a_bound(
+        self, config_root, home
+    ):
+        root = bounded_corpus(config_root, home)
+        assert retro.scan(root)["findings_omitted"] > 0
+        rows = rows_by_id(scan_payload(root=root))
+        assert rows["s-quiet"]["retrospective_findings"] == "unknown"
+
+    def test_a_bound_never_erases_positive_knowledge(self, config_root, home):
+        """The load-bearing case. Both branches in ONE scan: the bound clouds
+        the negative and leaves the positive intact. Rev 3's acceptance
+        criteria got this backwards (§7.8)."""
+        root = bounded_corpus(config_root, home)
+        payload = scan_payload(root=root)
+        rows = rows_by_id(payload)
+        assert retro.scan(root)["findings_omitted"] > 0
+        assert rows["s-loud"]["retrospective_findings"] == "present"
+        assert rows["s-quiet"]["retrospective_findings"] == "unknown"
+
+    def test_the_field_is_a_string_enum_and_never_null(self, config_root, home):
+        """A `has_`-prefixed nullable boolean would let a client treating
+        JSON null as falsy turn 'cannot be established' into 'no findings'."""
+        for root in (mixed_corpus(config_root, home),
+                     bounded_corpus(config_root, home)):
+            for row in scan_payload(root=root)["session_activity"]:
+                state = row["retrospective_findings"]
+                assert isinstance(state, str)
+                assert state in ("present", "absent", "unknown")
+
+    def test_present_count_agrees_with_the_shipped_accounting_field(
+        self, config_root, home
+    ):
+        payload = scan_payload(root=mixed_corpus(config_root, home))
+        present = [row for row in payload["session_activity"]
+                   if row["retrospective_findings"] == "present"]
+        assert len(present) == payload["sessions_carrying_findings"]
+
+
+class TestCorrelationKey:
+    """§4.2 — labels are not unique, so the array needs a join key."""
+
+    def test_standout_entries_join_within_one_response(
+        self, config_root, home
+    ):
+        """`other_reviewed[]` is not checked here because it exists only on
+        detail, where `session_activity[]` is deliberately absent; that join
+        is the cross-call case below."""
+        payload = scan_payload(root=mixed_corpus(config_root, home))
+        rows = rows_by_id(payload)
+        for block in payload["standout"]:
+            assert block["session_id"] in rows
+
+    def test_the_key_is_on_every_session_bearing_object(
+        self, config_root, home
+    ):
+        root = mixed_corpus(config_root, home)
+        summary = scan_payload(root=root)
+        detail = scan_payload(detail=True, root=root)
+        for block in summary["standout"]:
+            assert block["session_id"]
+        for block in detail["standout"] + detail["other_reviewed"]:
+            assert block["session_id"]
+
+    def test_summary_and_detail_join_over_a_static_fixture(
+        self, config_root, home
+    ):
+        """Two calls are two independent scans, so the fixture must be static
+        and `now` pinned. This asserts the ONE thing the key guarantees:
+        where a session occurs in both responses, it is the same session.
+
+        It deliberately asserts nothing about presence, counter stability or
+        ranking stability across the two calls, none of which the key
+        guarantees (§4.2).
+        """
+        root = mixed_corpus(config_root, home)
+        now = datetime(2026, 8, 25, tzinfo=timezone.utc)
+        summary = scan_payload(root=root, now=now)
+        detail = scan_payload(detail=True, root=root, now=now)
+        rows = rows_by_id(summary)
+        joined = [block for block in detail["standout"] + detail["other_reviewed"]
+                  if block["session_id"] in rows]
+        assert len(joined) == 2
+        for block in joined:
+            assert rows[block["session_id"]]["session"] == block["session"]
+
+    def test_two_identically_titled_sessions_stay_distinguishable(
+        self, config_root, home
+    ):
+        """§7.7, pinned as a test rather than left as an assumption: the
+        labels collide by construction and the rows still join."""
+        root = duplicate_title_corpus(config_root, home)
+        payload = scan_payload(root=root)
+        rows = payload["session_activity"]
+        assert len(rows) == 2
+        assert len({row["session"] for row in rows}) == 1
+        assert {row["session_id"] for row in rows} == {"s-one", "s-two"}
+        for block in payload["standout"]:
+            matches = [row for row in rows
+                       if row["session_id"] == block["session_id"]]
+            assert len(matches) == 1
+
+
+class TestDetailBoundary:
+    """§4.4 rule 1 — the key is the ONLY thing this release puts on detail."""
+
+    def test_no_detail_object_gains_a_counter_or_finding_state(
+        self, config_root, home
+    ):
+        for root in (mixed_corpus(config_root, home),
+                     bounded_corpus(config_root, home)):
+            detail = scan_payload(detail=True, root=root)
+            for block in detail["standout"] + detail["other_reviewed"]:
+                for banned in ("tool_calls", "file_operations", "shell_calls",
+                               "retrospective_findings", "session_activity"):
+                    assert banned not in block
+
+    def test_detail_session_blocks_carry_only_the_shipped_keys_plus_the_key(
+        self, config_root, home
+    ):
+        detail = scan_payload(detail=True, root=mixed_corpus(config_root, home))
+        for block in detail["standout"]:
+            assert set(block) <= {"session_id", "session", "working_in",
+                                  "groups"}
+
+
+class TestCP1ClaimSweep:
+    """§8 — the vocabulary guard, run under BOTH ordinary and flattened
+    matching. Line wrapping produced a false negative three times while this
+    plan was written, so a single-mode sweep is not evidence."""
+
+    def _new_surface(self, config_root, home):
+        """Everything this release adds, and nothing it inherits.
+
+        The whole payload is deliberately NOT swept here: the shipped
+        `_NO_FINDINGS_NOTE` says "not a statement that they were clean" and
+        `_SCAN_LIMITS` says "whether an action complied with policy" — both
+        negate the vocabulary rather than asserting it, and both are governed
+        by the shipped `test_neither_surface_states_a_verdict`. Sweeping them
+        again here would only prove the sweep can produce false positives.
+        """
+        parts = []
+        for root in (mixed_corpus(config_root, home),
+                     bounded_corpus(config_root, home)):
+            summary = scan_payload(root=root)
+            detail = scan_payload(detail=True, root=root)
+            parts.append(json.dumps(summary["session_activity"]))
+            parts.extend(json.dumps(block["session_id"])
+                         for block in detail["standout"]
+                         + detail["other_reviewed"])
+        return [part.lower() for part in parts]
+
+    def test_no_verdict_vocabulary_on_the_new_surface(self, config_root, home):
+        for surface in self._new_surface(config_root, home):
+            for mode in (surface, flat(surface)):
+                for banned in ("severity", "risk", "score", "confidence",
+                               "clean", "safe", "compliant", "violation",
+                               "nothing happened"):
+                    assert banned not in mode
+
+    def test_the_new_vocabulary_stays_off_the_cli_screens(
+        self, config_root, home
+    ):
+        """Both CLI screens are untouched by this release."""
+        rendered = render_scan_detail(retro.scan(
+            mixed_corpus(config_root, home)))
+        for mode in (rendered, flat(rendered)):
+            for absent in ("session_activity", "retrospective_findings",
+                           "session_id"):
+                assert absent not in mode
+
+
+# ---------------------------------------------------------------------------
+# v0.3.1.2 CP2 — `target_count` and the two bounds that decide its exactness.
+# ---------------------------------------------------------------------------
+
+
+def display_bound_corpus(config_root, home, *, targets=700):
+    """§4.3 case 2 — the gap between the two bounds, built to scale.
+
+    700 distinct cross-project targets in one session: `MAX_TARGETS` is
+    10,000 so collection is complete (`targets_omitted == 0`), while
+    `MAX_DISPLAY_FINDINGS` is 500 so display drops 200
+    (`findings_omitted == 200`). The group's target list therefore holds 500
+    of 700, and a rule consulting only the collection bound would call that
+    exact.
+    """
+    source = git_repo(home, "repo-a")
+    dest = git_repo(home, "repo-b")
+    install(config_root, [activity("s", cwd=str(source), tools=[
+        write_block(dest / ("f%04d.txt" % i)) for i in range(targets)])])
+    return config_root
+
+
+def collection_bound_corpus(config_root, home, *, cross=5, filler=10_050):
+    """§4.3 cases 3 and 4 — a real `MAX_TARGETS` overflow, not a patched one.
+
+    The cross-project writes come first so they are collected, then
+    same-project writes consume the remaining budget. Same-project writes
+    enter `write_events` (they hold the collection key) but are dropped at
+    classification, so they raise `targets_omitted` without becoming
+    findings. `cross` therefore sets `findings_omitted` independently:
+    5 leaves it at 0 (case 3), 600 pushes it past 500 (case 4).
+    """
+    source = git_repo(home, "repo-a")
+    dest = git_repo(home, "repo-b")
+    tools = [write_block(dest / ("c%04d.txt" % i)) for i in range(cross)]
+    tools += [write_block(source / ("s%05d.txt" % i)) for i in range(filler)]
+    install(config_root, [activity("s", cwd=str(source), tools=tools)])
+    return config_root
+
+
+def cross_group(payload):
+    """The one `another_project` group in a single-session summary."""
+    groups = [g for g in payload["standout"][0]["groups"]
+              if g["kind"] == "another_project"]
+    assert len(groups) == 1
+    return groups[0]
+
+
+class TestTargetCountBoundedMatrix:
+    """§4.3 condition 2 — exactness needs BOTH counters clear.
+
+    Two independent bounds fire at different thresholds, so checking one is
+    not checking the other. Each case below asserts the counters it relies
+    on rather than assuming the fixture produced them.
+    """
+
+    def test_case_1_both_clear_gives_an_exact_count(self, config_root, home):
+        root = cross_corpus(config_root, home, ops=3)
+        result = retro.scan(root)
+        assert result["targets_omitted"] == 0
+        assert result["findings_omitted"] == 0
+        group = cross_group(scan_payload(root=root))
+        # Three distinct files in one destination.
+        assert group["target_count"] == 3
+        assert group["write_operations"] == 3
+
+    def test_case_1_count_equals_the_true_distinct_targets(
+        self, config_root, home
+    ):
+        root = display_bound_corpus(config_root, home, targets=12)
+        result = retro.scan(root)
+        assert result["findings_omitted"] == 0
+        group = cross_group(scan_payload(root=root))
+        assert group["target_count"] == 12 == len(result["findings"])
+
+    def test_case_2_display_bound_alone_forces_null(self, config_root, home):
+        """The case a single-counter rule gets wrong. Collection was
+        complete; display was not."""
+        root = display_bound_corpus(config_root, home)
+        result = retro.scan(root)
+        assert result["targets_omitted"] == 0
+        assert result["findings_omitted"] == 200
+        assert len(result["findings"]) == 500
+        group = cross_group(scan_payload(root=root))
+        assert group["target_count"] is None
+
+    def test_case_3_collection_bound_alone_forces_null(
+        self, config_root, home
+    ):
+        root = collection_bound_corpus(config_root, home)
+        result = retro.scan(root)
+        assert result["targets_omitted"] > 0
+        assert result["findings_omitted"] == 0
+        group = cross_group(scan_payload(root=root))
+        assert group["target_count"] is None
+
+    def test_case_4_both_bounds_force_null(self, config_root, home):
+        root = collection_bound_corpus(config_root, home, cross=600)
+        result = retro.scan(root)
+        assert result["targets_omitted"] > 0
+        assert result["findings_omitted"] > 0
+        group = cross_group(scan_payload(root=root))
+        assert group["target_count"] is None
+
+    def test_null_is_present_not_omitted(self, config_root, home):
+        """`null` and absent carry different facts and must not be
+        conflated: omitting it under a bound would make a bounded
+        cross-project group look like a non-project group."""
+        group = cross_group(scan_payload(
+            root=display_bound_corpus(config_root, home)))
+        assert "target_count" in group
+        assert group["target_count"] is None
+
+
+class TestTargetCountGroupKinds:
+    """§4.3 condition 1 — the count belongs to cross-project groups only."""
+
+    @pytest.mark.parametrize("bounded", [False, True])
+    def test_absent_for_no_identifiable_project(
+        self, config_root, home, bounded
+    ):
+        source = git_repo(home, "repo-a")
+        scratch = home / "scratch"
+        scratch.mkdir(exist_ok=True)
+        count = 700 if bounded else 3
+        install(config_root, [activity("s", cwd=str(source), tools=[
+            write_block(scratch / ("f%04d.md" % i)) for i in range(count)])])
+        payload = scan_payload(root=config_root)
+        [group] = payload["standout"][0]["groups"]
+        assert group["kind"] == "no_identifiable_project"
+        # A non-project group is DEFINED by Reader not identifying a
+        # project, so descendants of one dead tree would inflate any count
+        # of places. Unsupported, not merely unavailable.
+        assert "target_count" not in group
+
+    def test_absent_for_global_configuration(self, config_root, home):
+        source = git_repo(home, "repo-a")
+        install(config_root, [activity("s", cwd=str(source), tools=[
+            write_block(home / ".claude" / "settings.json"),
+            write_block(home / ".claude" / "hooks" / "post.sh")])])
+        [group] = scan_payload(root=config_root)["standout"][0]["groups"]
+        assert group["kind"] == "global_configuration"
+        assert "target_count" not in group
+
+    def test_summary_only(self, config_root, home):
+        """Detail carries `targets[]` and `bounded`; it needs no count."""
+        root = cross_corpus(config_root, home, ops=3)
+        detail = scan_payload(detail=True, root=root)
+        for block in detail["standout"]:
+            for group in block["groups"]:
+                assert "target_count" not in group
+
+
+class TestTargetCountShippedProperties:
+    """§8 — two properties already true of the shipped `Finding` shape,
+    pinned as regression tests rather than built here."""
+
+    def test_repeated_writes_to_one_target_count_as_one(
+        self, config_root, home
+    ):
+        """`retro.py:735` keys findings by (session, class, target) and sums
+        `op_count`, so volume and target count move independently."""
+        source = git_repo(home, "repo-a")
+        dest = git_repo(home, "repo-b")
+        install(config_root, [activity("s", cwd=str(source), tools=[
+            write_block(dest / "same.txt") for _ in range(19)])])
+        group = cross_group(scan_payload(root=config_root))
+        assert group["write_operations"] == 19
+        assert group["target_count"] == 1
+
+    def test_each_destination_root_counts_independently(
+        self, config_root, home
+    ):
+        """`_scan_groups` subgroups by `dest_root`, so no count spans two
+        destinations."""
+        source = git_repo(home, "repo-a")
+        b, c = git_repo(home, "repo-b"), git_repo(home, "repo-c")
+        install(config_root, [activity("s", cwd=str(source), tools=[
+            write_block(b / "one.txt"), write_block(b / "two.txt"),
+            write_block(c / "only.txt")])])
+        groups = {g["destination"]: g
+                  for g in scan_payload(root=config_root)["standout"][0]["groups"]}
+        assert groups["~/repo-b"]["target_count"] == 2
+        assert groups["~/repo-c"]["target_count"] == 1
+
+
+class TestWriteOperationsRemainsUnmarked:
+    """§6.1 / issue #11 — the shipped defect is pinned as KNOWN, not fixed.
+
+    `write_operations` is computed from the same truncated array as
+    `target_count` and is short by the same amount under a bound, but it
+    keeps no bounded state. This release deliberately does not repair that;
+    these tests exist so a later reader cannot mistake it for repaired.
+    """
+
+    def test_it_is_a_plain_integer_when_the_count_is_nulled(
+        self, config_root, home
+    ):
+        group = cross_group(scan_payload(
+            root=display_bound_corpus(config_root, home)))
+        assert group["target_count"] is None
+        assert isinstance(group["write_operations"], int)
+        assert group["write_operations"] > 0
+
+    def test_it_carries_no_bounded_marker_of_its_own(self, config_root, home):
+        group = cross_group(scan_payload(
+            root=display_bound_corpus(config_root, home)))
+        for marker in ("write_operations_bounded", "approximate",
+                       "at_least", "lower_bound", "partial"):
+            assert marker not in group
+
+    def test_it_reports_the_truncated_total_under_a_display_bound(
+        self, config_root, home
+    ):
+        """The defect stated as behavior: 700 writes happened, 500 findings
+        survived display, and the integer says 500 with nothing marking it."""
+        root = display_bound_corpus(config_root, home)
+        assert retro.scan(root)["findings_omitted"] == 200
+        group = cross_group(scan_payload(root=root))
+        assert group["write_operations"] == 500
+
+
+class TestCP2ClaimSweep:
+    """§8 — no approximation vocabulary enters with the count. Run under
+    both ordinary and whitespace-flattened matching."""
+
+    def test_no_approximation_or_lower_bound_language(self, config_root, home):
+        for root in (cross_corpus(config_root, home, ops=3),
+                     display_bound_corpus(config_root, home),
+                     collection_bound_corpus(config_root, home)):
+            surface = json.dumps(scan_payload(root=root)).lower()
+            for mode in (surface, flat(surface)):
+                for banned in ("approximate", "at least", "roughly",
+                               "estimated", "lower bound", "severity",
+                               "risk", "score", "confidence"):
+                    assert banned not in mode
