@@ -425,13 +425,17 @@ def _session_activity(result: Dict[str, Any], findings: List[Any],
     return rows
 
 
-def _scan_groups(mine: List[Any], home: str, detail: bool) -> List[Dict[str, Any]]:
+def _scan_groups(mine: List[Any], home: str, detail: bool,
+                 counts_exact: bool = True) -> List[Dict[str, Any]]:
     """One session's findings as evidence groups, in the CLI's order.
 
     Config first (rank 1), then each destination project strongest first,
     then the unidentifiable locations. Findings arrive in `rank_findings`
     order and are never reordered here, so a group's targets carry the
     shipped ranking rather than one invented for MCP.
+
+    ``counts_exact`` is the §4.3 condition-2 state: whether BOTH collection
+    and display bounds were clear for this scan. It decides `target_count`.
     """
     from sentience_governor.analyze.renderers import (
         _abbrev,
@@ -470,16 +474,38 @@ def _scan_groups(mine: List[Any], home: str, detail: bool) -> List[Dict[str, Any
         for root, items in ordered:
             group = {"kind": _KIND_ANOTHER_PROJECT,
                      "destination": _abbrev(root, home),
+                     # A plain, unmarked integer, computed from the same
+                     # truncated array as `target_count` and short by the
+                     # same amount under a bound. That is shipped behavior
+                     # this release deliberately does not change (issue #11,
+                     # §6.1): pinned as known, not silently repaired.
                      "write_operations": sum(f.op_count for f in items)}
             if detail:
                 group["targets"] = targets(items, root=root)
+            else:
+                # §4.3. Permitted here and only here: Reader resolved this
+                # destination root and holds the files inside it, so counting
+                # them is not the inference the no-aggregate rule bars. One
+                # finding is one normalized target — `retro.py:735` keys by
+                # (session, class, target) and sums `op_count` — so the
+                # length IS the distinct-target count.
+                #
+                # `null` rather than omitted under a bound: omitting it would
+                # make a bounded cross-project group indistinguishable from a
+                # non-project group, which is the barred inference wearing an
+                # absent field. The two carry different facts — "cannot be
+                # answered here" versus "may never be asked here".
+                group["target_count"] = len(items) if counts_exact else None
             groups.append(group)
 
     unidentified = [f for f in mine if f.finding_class == "non_project"]
     if unidentified:
         # Operation volume only. Never a count of distinct targets,
         # destinations, locations, trees or projects: descendants of one old
-        # tree would inflate a number Reader cannot know (§2.5).
+        # tree would inflate a number Reader cannot know (§2.5). `target_count`
+        # is absent here under EVERY bound state — this group kind is defined
+        # by Reader not identifying a project, which is the case the rule
+        # exists for, so the count is not merely unavailable but unsupported.
         group = {"kind": _KIND_NO_IDENTIFIABLE_PROJECT,
                  "write_operations": sum(f.op_count for f in unidentified)}
         if detail:
@@ -493,7 +519,8 @@ def _scan_groups(mine: List[Any], home: str, detail: bool) -> List[Dict[str, Any
 
 
 def _scan_session(session_id: str, findings: List[Any], labels: Dict[str, Any],
-                  home: str, detail: bool) -> Dict[str, Any]:
+                  home: str, detail: bool,
+                  counts_exact: bool = True) -> Dict[str, Any]:
     """One session block: label, where it worked, and its evidence groups."""
     from sentience_governor.analyze.renderers import _abbrev
 
@@ -514,7 +541,7 @@ def _scan_session(session_id: str, findings: List[Any], labels: Dict[str, Any],
         # Omitted rather than empty when unresolved: a blank working
         # directory would read as a claim that there was none.
         block["working_in"] = _abbrev(source_root, home)
-    block["groups"] = _scan_groups(mine, home, detail)
+    block["groups"] = _scan_groups(mine, home, detail, counts_exact)
     return block
 
 
@@ -546,6 +573,19 @@ def scan_payload(
     detail = bool(detail)
     result = retro.scan(root, since=since, now=now)
 
+    # §4.3 condition 2. TWO independent counters can each shorten a group's
+    # target list, and they fire at different thresholds: MAX_TARGETS
+    # (10,000 distinct collection keys) records `targets_omitted`, while
+    # MAX_DISPLAY_FINDINGS (500) records `findings_omitted` and then
+    # truncates the very array this payload is built from
+    # (`retro.py:766-767`). Any corpus between the two sits in the gap —
+    # 700 distinct cross-project targets in one session yields
+    # `targets_omitted: 0`, `findings_omitted: 200` and 500 retained — so a
+    # rule consulting only the collection bound would emit an exact-looking
+    # integer short by 200. Both must be clear.
+    counts_exact = (result.get("targets_omitted", 0) == 0
+                    and result.get("findings_omitted", 0) == 0)
+
     findings = list(result.get("findings") or [])
     labels = result.get("session_labels") or {}
     home = result.get("_home") or ""
@@ -562,13 +602,15 @@ def scan_payload(
             "period_end": _iso_date(result.get("period_end")),
             "read_only": True,
         },
-        "standout": [_scan_session(sid, findings, labels, home, detail)
+        "standout": [_scan_session(sid, findings, labels, home, detail,
+                                   counts_exact)
                      for sid in standout],
     }
 
     if detail:
         payload["other_reviewed"] = [
-            dict(_scan_session(sid, findings, labels, home, detail),
+            dict(_scan_session(sid, findings, labels, home, detail,
+                               counts_exact),
                  note=_NOT_STANDOUT_NOTE)
             for sid in carrying if sid not in standout
         ]
