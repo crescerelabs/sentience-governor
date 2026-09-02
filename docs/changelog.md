@@ -6,6 +6,45 @@ Breaking changes bump the minor version until 1.0. After 1.0, breaking changes b
 
 ---
 
+## 0.3.1.2 — 2026-09-01
+
+**Context for the review, over MCP.** The scan summary could say how many
+sessions carried findings without saying which ones, and a cross-project group
+could report its write operations without saying whether that was many edits to
+one file or one edit to many files.
+
+`sentience_scan` now returns `session_activity[]` on the summary: one entry per
+session in the review window, including the sessions that carried no findings,
+holding the tool, file and shell counters the scan already computes plus
+`retrospective_findings`. That field has three states rather than two:
+`present` when a finding for the session is retained, `absent` when none is
+retained and nothing was omitted, and `unknown` when none is retained but
+display omission means absence cannot be established. A counter of zero means
+Reader observed no counted activity of that kind, never that nothing happened.
+
+Every entry carries the full `session_id`, as do `standout[]` and
+`other_reviewed[]`, so a summary response can be joined to a detail response.
+Session labels are display values and are not unique: two sessions given the
+same custom title produce the same label. The key guarantees only that a
+session appearing in both responses is the same session, not that it appears in
+both, and not that counters or ranking are stable between them.
+
+Cross-project groups also carry `target_count`, how many distinct files the
+group's writes touched. It is exact only when both of the scan's omission
+counters are zero and `null` when either is not, since either bound can shorten
+a group's target list. On `no_identifiable_project` groups it is absent rather
+than null: that kind is defined by no project having been identified, so a
+count of distinct places would be a number Reader cannot know.
+
+Additive only. The tool signature, classification, ranking, standout selection,
+the `--json` contract and both `sentience scan` screens are unchanged.
+`write_operations` is also unchanged, including the fact that it carries no
+bounded marker of its own when display omission shortens it; that is
+[issue #11](https://github.com/crescerelabs/sentience-governor/issues/11) and is
+deliberately not repaired here.
+
+---
+
 ## 0.3.1.1 — 2026-08-28
 
 **The evidence behind the review.** `sentience scan --detail` shows the paths
