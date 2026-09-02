@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import os
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from sentience_governor.analyze.methodology import build_methodology
 from sentience_governor.analyze.policy_violation_burn_rate import (
@@ -350,10 +350,79 @@ _NO_FINDINGS_NOTE = (
     "classify, and did not evaluate shell commands."
 )
 
+# Per-session finding state (v0.3.1.2 §4.2). A three-state enum rather than a
+# nullable boolean: `findings_omitted` is a global counter, so a session whose
+# findings were all dropped by the display bound would present as having none.
+# A client treating JSON null as falsy would silently convert "cannot be
+# established" into "no findings"; an explicit enum cannot be collapsed by
+# accident. None of the three values says anything about WHY.
+_FINDINGS_PRESENT = "present"
+_FINDINGS_ABSENT = "absent"
+_FINDINGS_UNKNOWN = "unknown"
+
 
 def _iso_date(value: Optional[str]) -> Optional[str]:
     """The calendar date of an ISO timestamp, or None when unknown."""
     return value[:10] if value else None
+
+
+def _findings_state(session_id: str, retained: Set[str],
+                    findings_omitted: int) -> str:
+    """Which of the three finding states holds for one session (§4.2).
+
+    The order of the tests is load-bearing. A global bound clouds a negative
+    but never erases a positive: if collection was bounded and this session
+    still holds a retained finding, Reader knows a finding exists and must
+    say so. Only the absence case is weakened by the bound.
+    """
+    if session_id in retained:
+        return _FINDINGS_PRESENT
+    if findings_omitted == 0:
+        return _FINDINGS_ABSENT
+    return _FINDINGS_UNKNOWN
+
+
+def _session_activity(result: Dict[str, Any], findings: List[Any],
+                      labels: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """What Reader observed per session, for every session in the window.
+
+    Reads counters `retro.scan` already computed; no new analysis. Sorted by
+    the stable session identifier and by nothing else — sorting by activity
+    volume or finding count would reintroduce an importance ordering through
+    the back door. **Array position carries no meaning.** `standout[]` remains
+    the only place expressing which sessions stood out.
+
+    Counters are Reader-observable, not claims about the session: 0 means
+    Reader observed no counted activity of that kind in the transcript, which
+    is not the same as nothing having happened. `shell_calls` counts shell
+    TOOL INVOCATIONS, never commands — one invocation can carry a compound
+    command, a pipeline or a script, and Reader does not interpret Bash.
+    """
+    by_session = result.get("by_session") or {}
+    findings_omitted = result.get("findings_omitted", 0)
+    # Retained findings only. `findings` is already truncated by the display
+    # bound when it arrives here, which is precisely why the third state
+    # exists rather than a boolean.
+    retained = {f.session_id for f in findings}
+
+    rows: List[Dict[str, Any]] = []
+    for session_id in sorted(by_session):
+        counts = by_session[session_id] or {}
+        entry = labels.get(session_id) or {}
+        rows.append({
+            # The correlation key. The full existing session id — already in
+            # the shipped `--json` contract — because display labels are not
+            # unique: two sessions given the same custom title produce
+            # byte-identical labels and nothing dedupes them.
+            "session_id": session_id,
+            "session": entry.get("label") or session_id[:8],
+            "tool_calls": counts.get("tool_calls", 0),
+            "file_operations": counts.get("file_ops", 0),
+            "shell_calls": counts.get("shell_calls", 0),
+            "retrospective_findings": _findings_state(
+                session_id, retained, findings_omitted),
+        })
+    return rows
 
 
 def _scan_groups(mine: List[Any], home: str, detail: bool) -> List[Dict[str, Any]]:
@@ -431,6 +500,13 @@ def _scan_session(session_id: str, findings: List[Any], labels: Dict[str, Any],
     mine = [f for f in findings if f.session_id == session_id]
     entry = labels.get(session_id) or {}
     block: Dict[str, Any] = {
+        # The correlation key (§4.2), the ONLY thing this release adds to a
+        # detail-payload object: no activity counters and no finding state
+        # cross that boundary. It guarantees exactly one thing — where a
+        # session occurs in two responses, it is the same session. Not
+        # presence, not stable counters, not stable ranking: the two calls
+        # are independent scans over a corpus that grows.
+        "session_id": session_id,
         "session": entry.get("label") or session_id[:8],
     }
     source_root = next((f.source_root for f in mine if f.source_root), "")
@@ -501,10 +577,16 @@ def scan_payload(
             "note": _NO_FINDINGS_NOTE,
         }
     else:
+        # Summary only (§4.4). Detail already names every session carrying a
+        # finding and carries `bounded`; what it lacks is the sessions that
+        # carry none, and those are exactly what this array supplies.
+        payload["session_activity"] = _session_activity(
+            result, findings, labels)
         # Computed from the findings themselves, NOT from the shipped
         # `sessions_with_findings` field, which holds standout session IDs
         # (§2.2). The distinct name keeps two definitions of one field name
-        # out of the product.
+        # out of the product. Now derivable from `session_activity` by
+        # counting `present`; it stays because it is a shipped field.
         payload["sessions_carrying_findings"] = len(
             {f.session_id for f in findings})
 
