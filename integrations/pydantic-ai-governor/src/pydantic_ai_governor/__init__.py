@@ -3,14 +3,18 @@
 Governance-relevant evidence of what an agent actually dispatched at
 runtime, against the objective and scope it declared.
 
-This is CP1 scaffolding: the namespace exists and carries no capability
-logic yet. ``SentienceGovernor`` arrives in CP2.
+``SentienceGovernor`` opens one Sentience Governor session per Pydantic AI
+run and closes it when the run ends. It currently carries the session
+lifecycle only: declaration reading, tool classification and token capture
+arrive in later checkpoints.
 
 The distribution depends on ``sentience-governor``; the dependency never
 runs the other way, and core acquires no Pydantic AI dependency.
 """
 
 from importlib.metadata import PackageNotFoundError, version as _dist_version
+
+from pydantic_ai_governor.capability import SentienceGovernor
 
 _DISTRIBUTION = "pydantic-ai-governor"
 
@@ -25,4 +29,4 @@ except PackageNotFoundError:  # pragma: no cover - source tree, not installed
     # distribution.
     __version__ = "unknown"
 
-__all__ = ["__version__"]
+__all__ = ["SentienceGovernor", "__version__"]

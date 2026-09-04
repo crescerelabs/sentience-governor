@@ -93,7 +93,8 @@ def test_pytest_config_is_self_contained():
     assert _pyproject()["tool"]["pytest"]["ini_options"]["testpaths"] == ["tests"]
 
 
-def test_no_capability_logic_yet():
-    """CP1 is scaffolding. `SentienceGovernor` arrives in CP2, and this test
-    is expected to be replaced then."""
-    assert not hasattr(pydantic_ai_governor, "SentienceGovernor")
+def test_capability_is_exported():
+    """Replaces CP1's placeholder, which asserted the opposite while the
+    package was scaffolding only."""
+    assert hasattr(pydantic_ai_governor, "SentienceGovernor")
+    assert "SentienceGovernor" in pydantic_ai_governor.__all__
