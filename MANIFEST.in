@@ -10,3 +10,4 @@ prune tests
 prune examples
 prune docs
 prune server
+prune integrations
