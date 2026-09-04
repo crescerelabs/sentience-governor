@@ -16,11 +16,7 @@ from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCall
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.tools import Tool
 
-from sentience_governor.schema.events import (
-    IntentConfidence,
-    IntentSource,
-    OperationType,
-)
+from sentience_governor.schema.events import OperationType
 
 from pydantic_ai_governor import SentienceGovernor
 
@@ -170,12 +166,12 @@ async def test_concurrent_runs_get_distinct_sessions(gov):
 # ---------------------------------------------------------------------------
 
 class _BaselineProbe(SentienceGovernor):
-    """Drives the SHIPPED builder inside a real run, so the assertion below
-    is about wiring rather than about the cache in isolation.
+    """Asserts an in-scope call against a REAL declaration.
 
-    CP2 carries no declaration reading and no classification, so the intent
-    and the scope assertion are supplied by this test-local subclass. CP3
-    and CP4 replace it with the real thing; the assertion does not change.
+    As of CP3 the intent comes from the capability's own declaration path,
+    not from this subclass: the probe supplies only the scope assertion,
+    which is CP5's surface and does not exist yet. The assertion itself is
+    unchanged from CP2.
     """
 
     violations: List[List[str]]
@@ -187,15 +183,7 @@ class _BaselineProbe(SentienceGovernor):
     async def wrap_run(self, ctx, *, handler):
         self._open_session(ctx)
         try:
-            # An objective, and a scope that plainly covers what follows.
-            self._builder.build_intent_declared(
-                stated_objective="Fix the timeout",
-                intent_source=IntentSource.explicit,
-                intent_confidence=IntentConfidence.explicit,
-                authorization_claim=None,
-                session_scope_hint=["crm"],
-            )
-            # An in-scope read against that declared scope.
+            # An in-scope read against the declared scope.
             event = self._builder.build_scope_asserted(
                 tool_id="crm_fetch",
                 asserted_permissions=["read"],
@@ -216,7 +204,8 @@ async def test_in_scope_call_carries_no_pol_001():
     silent no-op and this same call acquires POL-001 while nothing raises
     anywhere. That is the failure this test exists to catch.
     """
-    probe = _BaselineProbe(agent_id="cp2-agent")
+    probe = _BaselineProbe(objective="Fix the timeout", scope=["crm"],
+                           agent_id="cp2-agent")
     await Agent(answering_model(), capabilities=[probe]).run("go")
 
     assert probe.violations == [[]], (
@@ -236,19 +225,11 @@ async def test_the_guard_fails_when_step_4_is_removed(monkeypatch):
         "sentience_governor.cache.cache.InProcessCache.init_session",
         lambda self, session_id: None,
     )
-    probe = _BaselineProbe(agent_id="cp2-agent")
+    probe = _BaselineProbe(objective="Fix the timeout", scope=["crm"],
+                           agent_id="cp2-agent")
 
     # The run still succeeds. That is the point: nothing signals the fault.
     await Agent(answering_model(), capabilities=[probe]).run("go")
 
     assert probe.violations == [["POL-001"]], probe.violations
 
-
-async def test_this_checkpoint_writes_nothing_to_disk(gov, isolated_home):
-    """CP2 is lifecycle only. It emits no events, so it constructs no sink
-    and creates no files. Asserted rather than assumed, because a sink
-    would force a destination choice and that is a contract this
-    checkpoint has no authority to make."""
-    await Agent(answering_model(), capabilities=[gov]).run("go")
-    assert list(isolated_home.rglob("*")) == []
-    assert not hasattr(gov, "_sink")
