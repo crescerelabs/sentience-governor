@@ -27,6 +27,7 @@ from sentience_governor.schema.events import (
 from sentience_governor.session_manager.manager import SessionManager
 from sentience_governor.sink.writer import FileSink, SinkWriter
 
+from pydantic_ai_governor import evidence
 from pydantic_ai_governor.declaration import Declaration, resolve
 
 _DEFAULT_AGENT_ID = "pydantic-ai-agent"
@@ -108,6 +109,9 @@ class SentienceGovernor(AbstractCapability[Any]):
         self._sink: Optional[SinkWriter] = None
         self._declaration: Declaration = self._default
         self._rejection: Optional[str] = None
+        # Most recent resolved classification, for the checkpoint that will
+        # emit evidence from it. Never keyed per call on `self`.
+        self._classification = evidence.Classification()
 
     # -- Pydantic AI listing identity -------------------------------------
     @staticmethod
@@ -159,6 +163,35 @@ class SentienceGovernor(AbstractCapability[Any]):
             # LangChain adapter's inactivity reaper is a backstop rather
             # than a plan.
             self._close_session()
+
+    # -- execution boundary ------------------------------------------------
+    async def wrap_tool_execute(
+        self, ctx: Any, *, call: Any, tool_def: Any, args: Any, handler: Any
+    ) -> Any:
+        """Classify the call, then dispatch it unchanged.
+
+        This checkpoint resolves and reports classification. It emits no
+        scope assertion and no context snapshot: those are the next
+        checkpoint's surface, and the classification resolved here is what
+        they will carry.
+
+        The handler takes the validated args dict at pydantic-ai 2.37.0.
+        """
+        classification, rejection = evidence.resolve(
+            getattr(tool_def, "metadata", None)
+        )
+        self._classification = classification
+        if rejection is not None:
+            # D2: a configuration-contract failure, not a policy decision.
+            # It says the metadata did not parse and makes no claim about
+            # the action itself.
+            self._fail_open(
+                f"Sentience Governor ignored the classification on tool "
+                f"'{call.tool_name}': {rejection}.",
+                f"tool classification rejected for '{call.tool_name}': "
+                f"{rejection}",
+            )
+        return await handler(args)
 
     # -- internals ---------------------------------------------------------
     def _open_session(self, ctx: Any) -> None:
@@ -230,11 +263,23 @@ class SentienceGovernor(AbstractCapability[Any]):
         )
 
     def _report_rejection(self) -> None:
-        """Visible fail-open for a malformed declaration (D1).
+        """Visible fail-open for a malformed run declaration (D1)."""
+        if self._rejection is None:
+            return
+        self._fail_open(
+            f"Sentience Governor ignored this run's declaration: "
+            f"{self._rejection}.",
+            f"run declaration rejected: {self._rejection}",
+        )
+
+    def _fail_open(self, warning_text: str, failure_reason: str) -> None:
+        """The shared visible-fail-open path for D1 and D2.
 
         Never silent, never raising, never blocking. The developer gets a
         warning at the keyboard, and a GOVERNANCE_ERROR goes through the
-        shipped core evidence path.
+        shipped core evidence path. One implementation serves both
+        decisions: a malformed declaration and a malformed classification
+        are the same kind of failure, and they should not drift apart.
 
         **Where that error surfaces is core's decision, not ours.**
         `SinkWriter` short-circuits this event type to stdout regardless of
@@ -249,22 +294,12 @@ class SentienceGovernor(AbstractCapability[Any]):
         outside our control, so the rule is absolute rather than
         conditional on a destination.
         """
-        if self._rejection is None:
-            return
-
-        warnings.warn(
-            f"Sentience Governor ignored this run's declaration: "
-            f"{self._rejection}.",
-            UserWarning,
-            stacklevel=3,
-        )
+        warnings.warn(warning_text, UserWarning, stacklevel=3)
         self._emit(
             self._builder.build_governance_error(
                 error_type=ErrorType.SCHEMA_VIOLATION,
                 severity=Severity.warning,
-                failure_reason=(
-                    f"run declaration rejected: {self._rejection}"
-                ),
+                failure_reason=failure_reason,
             )
         )
 
