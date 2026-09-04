@@ -38,12 +38,75 @@ rejected classification does not license guessing either.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
-from typing import Any, Mapping, Optional, Sequence, Tuple
+from enum import Enum
+from typing import Any, List, Mapping, Optional, Sequence, Tuple
 
 from sentience_governor.schema.events import ClassificationSource, OperationType
 
 from pydantic_ai_governor.declaration import NAMESPACE
+
+
+class Operation(str, Enum):
+    """The integration's internal operation semantic.
+
+    Identical to core's ``OperationType`` except for ``UNKNOWN``, which
+    core cannot represent: ``OperationType`` has four members and
+    ``operation_type`` is a required, non-nullable field on
+    ``ScopeAssertedPayload``. There is no way to say "undeclared" in the
+    event, so the distinction lives here and is mapped at the boundary by
+    :func:`to_core_operation`.
+    """
+
+    READ = "READ"
+    WRITE = "WRITE"
+    DELETE = "DELETE"
+    EXECUTE = "EXECUTE"
+    UNKNOWN = "UNKNOWN"
+
+
+def to_core_operation(operation: "Operation") -> Tuple[OperationType, List[str]]:
+    """Map the internal semantic onto what core can actually serialize.
+
+    Returns the ``operation_type`` and the ``asserted_permissions`` that
+    belong with it.
+
+    **`UNKNOWN` maps to `READ` with no permissions, and that `READ` is a
+    compatibility fallback rather than a claim that the tool read
+    anything.** It is chosen because `READ` is the only non-mutating
+    member: `_eval_scope` treats WRITE, DELETE and EXECUTE as mutating, so
+    any of those would manufacture `SCOPE_OPERATION_UNEXPECTED` and
+    POL-001 in an undeclared session on the strength of a fallback rather
+    than anything the developer did.
+
+    The empty permissions list distinguishes this from an explicitly
+    declared `READ`, which carries ``["read"]``. **That is a marker for a
+    reader of the trace, not a mechanism**: nothing in this release
+    interprets empty permissions as UNKNOWN, and nothing may.
+
+    **This mapping exists only because core has no undeclared-operation
+    semantic.** When core gains one, it is removed and `UNKNOWN`
+    serializes directly.
+    """
+    if operation is Operation.UNKNOWN:
+        return OperationType.READ, []
+    return OperationType(operation.value), [operation.value.lower()]
+
+
+def estimate_context_tokens(data: Any) -> int:
+    """An estimated context token count, using core's own estimator.
+
+    Deliberately identical to the shipped `wrapper/mcp.py:406-412`, so the
+    field carries the meaning the product already gives it rather than a
+    second convention. **It is an estimate, not measured model-token
+    usage**: measured usage arrives separately on `llm_prompt_tokens` and
+    `llm_completion_tokens`.
+    """
+    try:
+        return max(1, len(json.dumps(data)) // 4)
+    except Exception:
+        return 1
 
 _OPERATION = "operation"
 _TARGET_SYSTEM = "target_system"
@@ -65,9 +128,12 @@ class Classification:
     ``source`` is ``explicit`` only when a well-formed block supplied it.
     Absent and rejected both yield ``unclassified``, which is the honest
     answer and the one core's POL-003 semantics expect.
+
+    ``operation`` is ``UNKNOWN`` when nothing was declared. It is never
+    inferred from the tool's name.
     """
 
-    operation: Optional[OperationType] = None
+    operation: Operation = Operation.UNKNOWN
     target_system: Optional[str] = None
     data_classifications: Tuple[str, ...] = ()
     source: ClassificationSource = ClassificationSource.unclassified
@@ -76,9 +142,13 @@ class Classification:
     def is_explicit(self) -> bool:
         return self.source == ClassificationSource.explicit
 
-    def asserted_permissions(self) -> list[str]:
-        """Empty unless an operation was explicitly declared."""
-        return [self.operation.value.lower()] if self.operation else []
+    @property
+    def operation_declared(self) -> bool:
+        return self.operation is not Operation.UNKNOWN
+
+    def core_operation(self) -> Tuple[OperationType, List[str]]:
+        """What to put on the event, and the permissions that belong."""
+        return to_core_operation(self.operation)
 
     def target_for(self, tool_name: str) -> str:
         """The declared target system, else the tool's own name.
@@ -160,7 +230,7 @@ def resolve(tool_metadata: Any) -> Tuple[Classification, Optional[str]]:
     operation = raw.get(_OPERATION)
     values = raw.get(_CLASSIFICATION)
     classification = Classification(
-        operation=OperationType(operation) if operation else None,
+        operation=Operation(operation) if operation else Operation.UNKNOWN,
         target_system=raw.get(_TARGET_SYSTEM),
         data_classifications=tuple(values) if values is not None else (),
         # Describes the provenance of the DATA CLASSIFICATIONS, not of the

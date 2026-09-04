@@ -168,12 +168,18 @@ class SentienceGovernor(AbstractCapability[Any]):
     async def wrap_tool_execute(
         self, ctx: Any, *, call: Any, tool_def: Any, args: Any, handler: Any
     ) -> Any:
-        """Classify the call, then dispatch it unchanged.
+        """The execution boundary: assert, dispatch, snapshot.
 
-        This checkpoint resolves and reports classification. It emits no
-        scope assertion and no context snapshot: those are the next
-        checkpoint's surface, and the classification resolved here is what
-        they will carry.
+        Ordering is the evidence. `SCOPE_ASSERTED` fires **after validation
+        and immediately before dispatch**, so it records a call that really
+        is about to run: Pydantic guarantees a validation-failed call never
+        reaches this hook, which is why nothing here has to detect one. The
+        snapshot fires only on a normal return, so a raised tool leaves an
+        assertion with no snapshot and the exception propagates untouched.
+
+        That asymmetry is the outcome signal this schema has. The absence
+        of a snapshot is positional evidence that the call did not return;
+        there is no execution-outcome field to set, and none is invented.
 
         The handler takes the validated args dict at pydantic-ai 2.37.0.
         """
@@ -191,7 +197,45 @@ class SentienceGovernor(AbstractCapability[Any]):
                 f"tool classification rejected for '{call.tool_name}': "
                 f"{rejection}",
             )
-        return await handler(args)
+
+        tool_name = call.tool_name
+        tool_use_id = getattr(call, "tool_call_id", None)
+
+        # UNKNOWN maps to READ with no permissions purely so the event can
+        # be serialized: core has no undeclared-operation semantic. That
+        # READ is a compatibility fallback, NOT a claim the tool read
+        # anything. See `evidence.to_core_operation`.
+        operation_type, permissions = classification.core_operation()
+        self._emit(
+            self._builder.build_scope_asserted(
+                tool_id=tool_name,
+                asserted_permissions=permissions,
+                target_system=classification.target_for(tool_name),
+                operation_type=operation_type,
+                tool_use_id=tool_use_id,
+            )
+        )
+
+        # Nothing between the assertion and the dispatch. Anything that
+        # could raise here would produce an assertion for a call that never
+        # ran, which is the one shape this ordering exists to prevent.
+        result = await handler(args)
+
+        self._emit(
+            self._builder.build_context_snapshot(
+                data_classifications=list(classification.data_classifications),
+                classification_source=classification.source,
+                provenance=[classification.target_for(tool_name)],
+                retention_flags=[],
+                # An ESTIMATED context token count, using core's own
+                # estimator so the field carries the meaning the product
+                # already gives it. Measured model-token usage is a
+                # separate concern on separate fields.
+                context_size_tokens=evidence.estimate_context_tokens(result),
+                tool_use_id=tool_use_id,
+            )
+        )
+        return result
 
     # -- internals ---------------------------------------------------------
     def _open_session(self, ctx: Any) -> None:

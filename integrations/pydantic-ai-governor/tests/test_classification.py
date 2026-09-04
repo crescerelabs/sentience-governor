@@ -8,6 +8,7 @@ to keep it that way.
 from __future__ import annotations
 
 import json
+import os
 import warnings
 from pathlib import Path
 from typing import Any, List, Optional
@@ -20,7 +21,10 @@ from pydantic_ai.tools import Tool
 
 from sentience_governor.schema.events import ClassificationSource, OperationType
 
+from pydantic_ai_governor.evidence import Operation
+
 from pydantic_ai_governor import SentienceGovernor, evidence
+from pydantic_ai_governor.evidence import Classification
 
 pytestmark = pytest.mark.anyio
 
@@ -80,45 +84,54 @@ def tool_named(name: str, metadata: Optional[dict] = None) -> Tool:
 class _Capture(SentienceGovernor):
     """Records the classification each call resolved to.
 
-    CP4 resolves classification; emitting a scope assertion from it is the
-    next checkpoint's surface, so the assertion below is driven from here.
-    The same pattern CP2 used for the declaration, and CP5 replaces it.
+    As of CP5 the capability emits the scope assertion and the context
+    snapshot itself, so this no longer builds duplicate events: it observes
+    the resolved classification and reads the policy outcome back off the
+    real trace. The same dissolution CP3 performed on CP2's probe.
     """
 
     def __init__(self, **kw: Any) -> None:
         super().__init__(**kw)
         self.seen: List[evidence.Classification] = []
-        self.violations: List[List[str]] = []
-        self.flags: List[List[str]] = []
+        self.home: Optional[Path] = None
 
     async def wrap_tool_execute(self, ctx, *, call, tool_def, args, handler):
         result = await super().wrap_tool_execute(
             ctx, call=call, tool_def=tool_def, args=args, handler=handler
         )
-        c = self._classification
-        self.seen.append(c)
-
-        scope = self._builder.build_scope_asserted(
-            tool_id=call.tool_name,
-            asserted_permissions=c.asserted_permissions(),
-            target_system=c.target_for(call.tool_name),
-            operation_type=c.operation or OperationType.EXECUTE,
-        )
-        self.violations.append(list(scope.policy_violations or []))
-
-        snapshot = self._builder.build_context_snapshot(
-            data_classifications=list(c.data_classifications),
-            classification_source=c.source,
-            provenance=[c.target_for(call.tool_name)],
-            retention_flags=[],
-            context_size_tokens=len(str(result)),
-        )
-        self.flags.append(list(snapshot.advisory_flags or []))
-        self.violations.append(list(snapshot.policy_violations or []))
+        self.seen.append(self._classification)
         return result
 
+    def _written(self) -> List[dict]:
+        base = self.home / ".sentience" / "traces" / "pydantic-ai"
+        out: List[dict] = []
+        for path in sorted(base.glob("*.jsonl")):
+            out += [json.loads(l) for l in path.read_text().splitlines()
+                    if l.strip()]
+        return out
 
-async def drive(gov: SentienceGovernor, tool: Tool, **kw: Any):
+    def _first(self, event_type: str) -> dict:
+        return next(e for e in self._written() if e["event_type"] == event_type)
+
+    @property
+    def scope_violations(self) -> List[str]:
+        """POL-001 and friends, from the REAL scope assertion."""
+        return list(self._first("SCOPE_ASSERTED").get("policy_violations") or [])
+
+    @property
+    def snapshot_violations(self) -> List[str]:
+        """POL-003 and friends, from the REAL context snapshot."""
+        return list(self._first("CONTEXT_SNAPSHOT").get("policy_violations") or [])
+
+    @property
+    def snapshot_flags(self) -> List[str]:
+        return list(self._first("CONTEXT_SNAPSHOT").get("advisory_flags") or [])
+
+
+async def drive(gov: SentienceGovernor, tool: Tool, home: Path = None,
+                **kw: Any):
+    if isinstance(gov, _Capture):
+        gov.home = home if home is not None else Path(os.environ["HOME"])
     agent = Agent(one_call_model(tool.name), tools=[tool], capabilities=[gov])
     return await agent.run("go", **kw)
 
@@ -135,32 +148,33 @@ async def test_explicit_metadata_is_recorded(isolated_home):
     gov = _Capture(objective="Fix the timeout", scope=["crm"])
     await drive(gov, tool_named("crm_fetch", CRM_READ))
     [c] = gov.seen
-    assert c.operation == OperationType.READ
+    assert c.operation == Operation.READ
+    assert c.operation_declared
     assert c.target_system == "crm"
     assert c.data_classifications == ("internal",)
     assert c.source == ClassificationSource.explicit
-    assert c.asserted_permissions() == ["read"]
+    assert c.core_operation() == (OperationType.READ, ["read"])
 
 
 async def test_explicit_classification_drives_policy_in_scope(isolated_home):
     """Declared scope covers the declared target: no POL-001."""
     gov = _Capture(objective="Fix the timeout", scope=["crm"])
     await drive(gov, tool_named("crm_fetch", CRM_READ))
-    assert gov.violations[0] == []
+    assert gov.scope_violations == []
 
 
 async def test_explicit_classification_drives_policy_out_of_scope(isolated_home):
     """Same tool, a scope that excludes it: POL-001 fires."""
     gov = _Capture(objective="Fix the timeout", scope=["billing"])
     await drive(gov, tool_named("crm_fetch", CRM_READ))
-    assert "POL-001" in gov.violations[0]
+    assert "POL-001" in gov.scope_violations
 
 
 async def test_pol_003_suppressed_when_classification_is_explicit(isolated_home):
     gov = _Capture(objective="o", scope=["crm"])
     await drive(gov, tool_named("crm_fetch", CRM_READ))
-    assert gov.flags[0] == []
-    assert gov.violations[1] == []
+    assert gov.snapshot_flags == []
+    assert gov.snapshot_violations == []
 
 
 # ---------------------------------------------------------------------------
@@ -174,9 +188,9 @@ async def test_db_delete_record_does_not_become_delete_on_db(isolated_home):
     await drive(gov, tool_named("db_delete_record"))
 
     [c] = gov.seen
-    assert c.operation is None
+    assert c.operation is Operation.UNKNOWN
+    assert not c.operation_declared
     assert c.target_system is None
-    assert c.asserted_permissions() == []
     assert c.target_for("db_delete_record") == "db_delete_record"
     assert c.source == ClassificationSource.unclassified
 
@@ -184,8 +198,8 @@ async def test_db_delete_record_does_not_become_delete_on_db(isolated_home):
 async def test_absent_classification_keeps_pol_003(isolated_home):
     gov = _Capture(objective="o", scope=["crm"])
     await drive(gov, tool_named("db_delete_record"))
-    assert "CONTEXT_UNCLASSIFIED" in gov.flags[0]
-    assert "POL-003" in gov.violations[1]
+    assert "CONTEXT_UNCLASSIFIED" in gov.snapshot_flags
+    assert "POL-003" in gov.snapshot_violations
 
 
 async def test_absent_classification_is_not_an_error(isolated_home, capsys):
@@ -262,8 +276,8 @@ async def test_malformed_records_the_call_as_unclassified(isolated_home):
             "operation": "REDACT"}}))
     [c] = gov.seen
     assert c.source == ClassificationSource.unclassified
-    assert "CONTEXT_UNCLASSIFIED" in gov.flags[0]
-    assert "POL-003" in gov.violations[1]
+    assert "CONTEXT_UNCLASSIFIED" in gov.snapshot_flags
+    assert "POL-003" in gov.snapshot_violations
 
 
 async def test_rejected_classification_does_not_license_guessing(isolated_home):
@@ -274,8 +288,7 @@ async def test_rejected_classification_does_not_license_guessing(isolated_home):
         await drive(gov, tool_named("db_delete_record",
                                     {"sentience_governor": {"operation": "NOPE"}}))
     [c] = gov.seen
-    assert c.operation is None
-    assert c.asserted_permissions() == []
+    assert c.operation is Operation.UNKNOWN
     assert c.target_for("db_delete_record") == "db_delete_record"
 
 
@@ -289,7 +302,7 @@ async def test_malformed_block_is_rejected_as_a_unit(isolated_home):
             "operation": "READ", "target_system": "crm",
             "classification": {"internal": True}}}))
     [c] = gov.seen
-    assert c.operation is None
+    assert c.operation is Operation.UNKNOWN
     assert c.target_system is None
     assert c.data_classifications == ()
     assert c.source == ClassificationSource.unclassified
@@ -395,7 +408,7 @@ async def test_invalid_recognised_field_still_rejects_atomically(isolated_home):
         await drive(gov, tool_named("crm_fetch", {"sentience_governor": {
             "operation": "read", "classification": ["internal"], "foo": 1}}))
     [c] = gov.seen
-    assert c.operation is None
+    assert c.operation is Operation.UNKNOWN
     assert c.data_classifications == ()
     assert c.source == ClassificationSource.unclassified
 
@@ -415,10 +428,10 @@ async def test_source_is_explicit_only_when_classification_was_supplied(
         "operation": "READ", "target_system": "crm"}}))
 
     [c] = gov.seen
-    assert c.operation == OperationType.READ       # the operation is kept
+    assert c.operation == Operation.READ          # the operation is kept
     assert c.source == ClassificationSource.unclassified
-    assert "CONTEXT_UNCLASSIFIED" in gov.flags[0]
-    assert "POL-003" in gov.violations[1]
+    assert "CONTEXT_UNCLASSIFIED" in gov.snapshot_flags
+    assert "POL-003" in gov.snapshot_violations
 
 
 def test_source_tracks_the_classification_field_directly():
@@ -474,3 +487,73 @@ def test_resolve_treats_a_missing_namespace_as_absent():
 def test_every_operation_type_is_accepted():
     for member in OperationType:
         assert evidence.validate({"operation": member.value}) is None
+
+
+# ---------------------------------------------------------------------------
+# Rev 7 — UNKNOWN is internal; the boundary mapping is compatibility only
+# ---------------------------------------------------------------------------
+
+def test_unknown_is_the_default_and_is_never_a_core_type():
+    """The integration carries a semantic core cannot express."""
+    assert Classification().operation is Operation.UNKNOWN
+    assert "UNKNOWN" not in {m.value for m in OperationType}
+
+
+def test_unknown_maps_to_read_with_no_permissions():
+    """Compatibility only. READ is chosen because it is the one
+    non-mutating member: anything else would manufacture POL-001 in an
+    undeclared session on the strength of a fallback."""
+    assert evidence.to_core_operation(Operation.UNKNOWN) == (
+        OperationType.READ, [])
+
+
+def test_declared_read_is_distinguishable_from_the_fallback():
+    """Same operation_type, different permissions. That difference is the
+    only marker, and it is a marker rather than a mechanism."""
+    declared = evidence.to_core_operation(Operation.READ)
+    fallback = evidence.to_core_operation(Operation.UNKNOWN)
+    assert declared == (OperationType.READ, ["read"])
+    assert fallback == (OperationType.READ, [])
+    assert declared[0] == fallback[0]
+    assert declared[1] != fallback[1]
+
+
+def test_every_declared_operation_round_trips():
+    for member in (Operation.READ, Operation.WRITE, Operation.DELETE,
+                   Operation.EXECUTE):
+        op_type, perms = evidence.to_core_operation(member)
+        assert op_type.value == member.value
+        assert perms == [member.value.lower()]
+
+
+def test_nothing_interprets_empty_permissions_as_unknown():
+    """Rev 7 forbids a second classification channel on a field core
+    carries but never evaluates."""
+    src = Path(evidence.__file__).parent
+    for path in src.rglob("*.py"):
+        text = path.read_text()
+        assert "asserted_permissions ==" not in text
+        assert "permissions == []" not in text
+
+
+def test_context_estimate_matches_core_semantics():
+    """Same estimator core ships at wrapper/mcp.py:406-412, so the field
+    carries the meaning the product already gives it."""
+    import json as _json
+    for value in ("x" * 40, {"a": 1}, ["a", "b"], 5, None):
+        expected = max(1, len(_json.dumps(value)) // 4)
+        assert evidence.estimate_context_tokens(value) == expected
+
+
+def test_context_estimate_is_never_a_character_count():
+    """The defect this replaced: a long result must not report its length."""
+    value = "x" * 400
+    assert evidence.estimate_context_tokens(value) != len(value)
+    assert evidence.estimate_context_tokens(value) < len(value)
+
+
+def test_context_estimate_never_raises_and_never_returns_zero():
+    class Unserialisable:
+        def __repr__(self): return "<obj>"
+    assert evidence.estimate_context_tokens(Unserialisable()) == 1
+    assert evidence.estimate_context_tokens("") >= 1
