@@ -1,0 +1,79 @@
+name: integration-pydantic-ai
+
+# The `pydantic-ai-governor` integration suite.
+#
+# It needs its own job because the root `testpaths = ["tests"]` scopes
+# pytest discovery to the core suite: a green `test` run says nothing
+# about this integration, and before this workflow existed the
+# integration was verified locally only.
+#
+# Two distributions, one repository. This job installs core from the
+# working tree and the integration on top of it, then runs only the
+# integration's own tests. It never runs the core suite, and `test.yml`
+# never runs these.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: integration-pydantic-ai-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Matches the integration's own `requires-python = ">=3.10"`.
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        # Both ends of the declared `pydantic-ai-slim>=2.37.0,<2.38`.
+        # A bound nothing installs is a bound nothing tests: `floor` pins
+        # the exact minimum, `ceiling` resolves the newest still inside
+        # the range, so the range is exercised rather than described.
+        pydantic-ai: [floor, ceiling]
+
+    name: py${{ matrix.python-version }} · pydantic-ai ${{ matrix.pydantic-ai }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install core and the integration
+        run: |
+          python -m pip install --upgrade pip
+          # Core first, from this tree rather than from PyPI: the
+          # integration declares a dependency on published core, and
+          # installing it here would test the released core instead of
+          # the one this commit contains.
+          python -m pip install -e .
+          python -m pip install -e "./integrations/pydantic-ai-governor[dev]"
+
+      - name: Pin pydantic-ai-slim to the floor of the declared range
+        if: matrix.pydantic-ai == 'floor'
+        run: python -m pip install "pydantic-ai-slim==2.37.0"
+
+      - name: Resolve pydantic-ai-slim to the ceiling of the declared range
+        if: matrix.pydantic-ai == 'ceiling'
+        run: |
+          python -m pip install --upgrade "pydantic-ai-slim>=2.37.0,<2.38"
+
+      - name: Report the resolved environment
+        run: |
+          python -c "import sys; print('python', sys.version)"
+          python -m pip show pydantic-ai-slim sentience-governor \
+            | grep -E "^(Name|Version):"
+
+      # Explicit path, and only this path. Running from the repository
+      # root would pick up the root config and discover the core suite.
+      - name: Run the integration suite
+        run: python -m pytest integrations/pydantic-ai-governor/tests -v

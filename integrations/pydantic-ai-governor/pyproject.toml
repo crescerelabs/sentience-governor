@@ -1,0 +1,73 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pydantic-ai-governor"
+# Single version authority for this distribution. `__version__` is DERIVED
+# from installed metadata (see src/pydantic_ai_governor/__init__.py), never
+# hand-maintained, so a second source cannot drift from this one. The core
+# `sentience-governor` version is unrelated and versions independently.
+version = "0.1.0"
+description = "Agent Execution Evidence for Pydantic AI, by Sentience Governor"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Crescere Labs" }]
+keywords = [
+    "pydantic-ai",
+    "agent-governance",
+    "runtime-governance",
+    "execution-tracing",
+    "ai-governance",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+# Deliberate published compatibility contracts, not defaults. Both ceilings
+# are narrow on purpose:
+#
+#  * sentience-governor: a wider ceiling would let a future core release
+#    change this distribution's observable behavior without a new release
+#    of it. 0.3.1.2 is the measured version.
+#  * pydantic-ai-slim: 2.37.0 is the only tested version. A lower floor
+#    would install releases whose capability API differs; a higher ceiling
+#    would assert compatibility with releases that do not exist yet.
+#
+# Widen only after measured verification, and only in a new release of this
+# distribution. Never relax a bound in place.
+dependencies = [
+    "sentience-governor>=0.3.1.2,<0.3.2",
+    "pydantic-ai-slim>=2.37.0,<2.38",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "anyio>=4.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/crescerelabs/sentience-governor"
+Documentation = "https://github.com/crescerelabs/sentience-governor/tree/main/integrations/pydantic-ai-governor"
+Source = "https://github.com/crescerelabs/sentience-governor"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+# Allowlist. Only the integration package ships; tests are not product
+# surface and must stay out of the wheel.
+include = ["pydantic_ai_governor*"]
+
+[tool.pytest.ini_options]
+# Self-contained: this config governs the integration suite and does not
+# inherit the repository root's `testpaths`, which points at the core suite.
+testpaths = ["tests"]
