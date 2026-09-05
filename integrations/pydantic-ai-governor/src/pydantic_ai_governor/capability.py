@@ -4,8 +4,8 @@ Opens exactly one Sentience Governor session per Pydantic AI run, records
 what the run says it is for, and closes the session when the run ends, on
 the success path and the error path alike.
 
-**Tool classification and token capture are not here yet.** Those arrive in
-later checkpoints.
+It also holds the execution boundary — assert, dispatch, snapshot — and
+records each model turn's measured token usage.
 """
 
 from __future__ import annotations
@@ -236,6 +236,57 @@ class SentienceGovernor(AbstractCapability[Any]):
             )
         )
         return result
+
+    # -- token and model evidence -----------------------------------------
+    async def after_model_request(
+        self, ctx: Any, *, request_context: Any, response: Any
+    ) -> Any:
+        """Record one model turn's measured usage, and change nothing.
+
+        **The response is returned exactly as it arrived.** This hook is a
+        reader: it does not touch parts, usage, identity or control flow,
+        and an agent run behaves identically with the capability attached
+        and without it.
+
+        Everything recorded comes off `response`. **`ctx.usage` is not a
+        source**, because at this hook it lags by one request: a delta
+        taken from it credits each turn with the previous turn's tokens
+        and never attributes the last one. See `evidence.read_turn`.
+
+        Token snapshots carry no advisory flags and no violations — the
+        builder deliberately does not run them through `_eval_context`,
+        since a snapshot that observes no data classification would
+        otherwise manufacture a POL-003 on every turn.
+        """
+        if self._builder is None:
+            # No open session, so nothing to attribute this turn to.
+            # Recording it against a session that does not exist would be
+            # worse than not recording it.
+            return response
+
+        turn = evidence.read_turn(response, getattr(ctx, "run_step", None))
+        self._emit(
+            self._builder.build_token_snapshot(
+                llm_turn_id=turn.llm_turn_id,
+                # Measured, not the CP5 estimator: the provider reported
+                # the actual input size for this turn.
+                context_size_tokens=turn.context_size_tokens,
+                llm_prompt_tokens=turn.llm_prompt_tokens,
+                llm_completion_tokens=turn.llm_completion_tokens,
+                llm_cached_read_tokens=turn.llm_cached_read_tokens,
+                llm_cached_write_tokens=turn.llm_cached_write_tokens,
+                model_identifier=turn.model_identifier,
+                provider=turn.provider,
+                # Core's own join. The ids this turn issued, in response
+                # order, so an analyzer can attribute a tool call's
+                # violation to the turn that paid for it.
+                tool_use_ids=turn.tool_use_ids,
+                # Says whether `llm_turn_id` is provider-issued or our
+                # local fallback, positively in both directions.
+                provenance=turn.provenance,
+            )
+        )
+        return response
 
     # -- internals ---------------------------------------------------------
     def _open_session(self, ctx: Any) -> None:

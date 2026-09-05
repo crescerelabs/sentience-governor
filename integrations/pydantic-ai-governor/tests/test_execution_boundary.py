@@ -57,6 +57,28 @@ def types_of(evs: List[dict]) -> List[str]:
 
 def of_type(evs: List[dict], t: str) -> List[dict]:
     return [e for e in evs if e["event_type"] == t]
+def is_token_snapshot(event: dict) -> bool:
+    """True for a CP6 model-turn token snapshot.
+
+    Both snapshot kinds are `CONTEXT_SNAPSHOT`, and `llm_turn_id` is set
+    only by the token path — the same discriminator a real consumer uses,
+    since core's own schema comment describes these as the token-bearing
+    snapshots for a turn.
+    """
+    return (event["event_type"] == "CONTEXT_SNAPSHOT"
+            and event["payload"].get("llm_turn_id") is not None)
+
+
+def boundary(evs: List[dict]) -> List[dict]:
+    """Just the tool-boundary events.
+
+    The golden shapes below are claims about the execution boundary, so
+    they are asserted against the boundary events alone. Token snapshots
+    are not filtered out to make the tests pass more easily: their
+    interleaving with these events is pinned exactly, by
+    `test_token_snapshots_do_not_disturb_the_boundary_ordering`.
+    """
+    return [e for e in evs if not is_token_snapshot(e)]
 
 
 def crm_tool() -> Tool:
@@ -88,7 +110,7 @@ def one_call(tool_name: str, arg: str, value: Any = "c1") -> FunctionModel:
 async def test_assert_then_execute_then_snapshot(gov, isolated_home):
     result = await Agent(one_call("crm_fetch", "customer"), tools=[crm_tool()],
                          capabilities=[gov]).run("go")
-    assert types_of(events(isolated_home, result.run_id)) == [
+    assert types_of(boundary(events(isolated_home, result.run_id))) == [
         "AGENT_REGISTERED", "INTENT_DECLARED", "SCOPE_ASSERTED",
         "CONTEXT_SNAPSHOT",
     ]
@@ -113,7 +135,7 @@ async def test_tool_use_id_joins_the_assertion_to_its_snapshot(
                          capabilities=[gov]).run("go")
     evs = events(isolated_home, result.run_id)
     [scope] = of_type(evs, "SCOPE_ASSERTED")
-    [snapshot] = of_type(evs, "CONTEXT_SNAPSHOT")
+    [snapshot] = of_type(boundary(evs), "CONTEXT_SNAPSHOT")
     assert scope["payload"]["tool_use_id"]
     assert scope["payload"]["tool_use_id"] == snapshot["payload"]["tool_use_id"]
 
@@ -196,7 +218,8 @@ async def test_context_size_is_an_estimate_not_a_character_count(
     gov = SentienceGovernor(objective="o", scope=["crm"])
     result = await Agent(one_call("big", "x"), tools=[Tool(big)],
                          capabilities=[gov]).run("go")
-    [snap] = of_type(events(isolated_home, result.run_id), "CONTEXT_SNAPSHOT")
+    [snap] = of_type(boundary(events(isolated_home, result.run_id)),
+                     "CONTEXT_SNAPSHOT")
     size = snap["payload"]["context_size_tokens"]
 
     assert size == max(1, len(_json.dumps(long_value)) // 4)
@@ -221,7 +244,7 @@ async def test_raised_tool_asserts_but_never_snapshots(gov, isolated_home):
     assert evs, "no trace was written"
     written = [json.loads(l) for l in evs[0].read_text().splitlines() if l.strip()]
     assert len(of_type(written, "SCOPE_ASSERTED")) == 1
-    assert of_type(written, "CONTEXT_SNAPSHOT") == []
+    assert of_type(boundary(written), "CONTEXT_SNAPSHOT") == []
 
 
 async def test_exception_propagates_untouched(gov):
@@ -256,7 +279,7 @@ async def test_validation_failure_emits_no_assertion(gov, isolated_home):
                          capabilities=[gov]).run("go")
     evs = events(isolated_home, result.run_id)
     assert len(of_type(evs, "SCOPE_ASSERTED")) == 1
-    assert len(of_type(evs, "CONTEXT_SNAPSHOT")) == 1
+    assert len(of_type(boundary(evs), "CONTEXT_SNAPSHOT")) == 1
 
 
 async def test_retry_asserts_once_per_dispatched_attempt(gov, isolated_home):
@@ -284,7 +307,7 @@ async def test_retry_asserts_once_per_dispatched_attempt(gov, isolated_home):
                          capabilities=[gov]).run("go")
     evs = events(isolated_home, result.run_id)
     assert len(of_type(evs, "SCOPE_ASSERTED")) == 2
-    assert len(of_type(evs, "CONTEXT_SNAPSHOT")) == 1
+    assert len(of_type(boundary(evs), "CONTEXT_SNAPSHOT")) == 1
 
 
 async def test_streaming_preserves_the_same_shape(gov, isolated_home):
@@ -297,8 +320,10 @@ async def test_streaming_preserves_the_same_shape(gov, isolated_home):
     assert len(traces) == 1
     written = [json.loads(l) for l in traces[0].read_text().splitlines()
                if l.strip()]
-    assert types_of(written) == ["AGENT_REGISTERED", "INTENT_DECLARED",
-                                 "SCOPE_ASSERTED", "CONTEXT_SNAPSHOT"]
+    assert types_of(boundary(written)) == ["AGENT_REGISTERED",
+                                           "INTENT_DECLARED",
+                                           "SCOPE_ASSERTED",
+                                           "CONTEXT_SNAPSHOT"]
 
 
 # ---------------------------------------------------------------------------
@@ -343,7 +368,7 @@ async def test_deferral_emits_no_assertion_and_resume_is_its_own_session(
     assert second.run_id != first.run_id
     resumed = events(isolated_home, second.run_id)
     assert len(of_type(resumed, "SCOPE_ASSERTED")) == 1
-    assert len(of_type(resumed, "CONTEXT_SNAPSHOT")) == 1
+    assert len(of_type(boundary(resumed), "CONTEXT_SNAPSHOT")) == 1
     # Two sessions, two files, not one merged record.
     assert {e["session_id"] for e in resumed} == {second.run_id}
 
@@ -370,3 +395,35 @@ async def test_the_trace_is_consumed_by_the_shipped_analyzers(
 
     pulse = compute_pulse(events(isolated_home, result.run_id))
     assert isinstance(pulse, dict) and pulse.get("status")
+
+
+async def test_token_snapshots_do_not_disturb_the_boundary_ordering(
+    gov, isolated_home
+):
+    """The complete sequence, with nothing filtered out.
+
+    `boundary()` exists so the golden shapes above stay claims about the
+    execution boundary. This test is the reason that filtering is safe:
+    the full interleaving is pinned here, so a CP6 change that reordered
+    or duplicated boundary events would fail even though every filtered
+    test still passed.
+
+    A model turn precedes the tool call it requests, so the token snapshot
+    for that turn lands **before** the assertion — and assert, execute,
+    snapshot remains contiguous and in order inside it.
+    """
+    result = await Agent(one_call("crm_fetch", "customer"), tools=[crm_tool()],
+                         capabilities=[gov]).run("go")
+    evs = events(isolated_home, result.run_id)
+
+    assert types_of(evs) == [
+        "AGENT_REGISTERED",
+        "INTENT_DECLARED",
+        "CONTEXT_SNAPSHOT",   # turn 1: the model asks for the tool
+        "SCOPE_ASSERTED",     # the boundary, unmoved
+        "CONTEXT_SNAPSHOT",   # the tool result
+        "CONTEXT_SNAPSHOT",   # turn 2: the model answers
+    ]
+
+    kinds = [is_token_snapshot(e) for e in evs]
+    assert kinds == [False, False, True, False, False, True]

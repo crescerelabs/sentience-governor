@@ -113,6 +113,18 @@ class _Capture(SentienceGovernor):
     def _first(self, event_type: str) -> dict:
         return next(e for e in self._written() if e["event_type"] == event_type)
 
+    def _first_tool_snapshot(self) -> dict:
+        """The tool-result snapshot, not a CP6 model-turn token snapshot.
+
+        Both carry the CONTEXT_SNAPSHOT type, and the token one is emitted
+        first (the model turn precedes the tool call it requests), so a
+        plain "first CONTEXT_SNAPSHOT" would read classification evidence
+        off an event that makes no classification claim.
+        """
+        return next(e for e in self._written()
+                    if e["event_type"] == "CONTEXT_SNAPSHOT"
+                    and e["payload"].get("llm_turn_id") is None)
+
     @property
     def scope_violations(self) -> List[str]:
         """POL-001 and friends, from the REAL scope assertion."""
@@ -121,11 +133,11 @@ class _Capture(SentienceGovernor):
     @property
     def snapshot_violations(self) -> List[str]:
         """POL-003 and friends, from the REAL context snapshot."""
-        return list(self._first("CONTEXT_SNAPSHOT").get("policy_violations") or [])
+        return list(self._first_tool_snapshot().get("policy_violations") or [])
 
     @property
     def snapshot_flags(self) -> List[str]:
-        return list(self._first("CONTEXT_SNAPSHOT").get("advisory_flags") or [])
+        return list(self._first_tool_snapshot().get("advisory_flags") or [])
 
 
 async def drive(gov: SentienceGovernor, tool: Tool, home: Path = None,

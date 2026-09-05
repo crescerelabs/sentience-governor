@@ -275,3 +275,141 @@ def _partial_reason(unknown: Tuple[str, ...], block: Mapping) -> str:
     if fell_back:
         parts.append(f"{', '.join(fell_back)} fell back to the default")
     return "; ".join(parts)
+
+
+# --- CP6: token and model evidence -------------------------------------
+#
+# Every value below is read from the `ModelResponse` the model just
+# returned. **`ctx.usage` is never a source here.** Measured at
+# pydantic-ai 2.37.0, `ctx.usage` lags by one request at
+# `after_model_request`: across two turns using 10/5 then 30/7 it reads
+# 0/0 then 10/5. A delta taken from it credits each turn with the
+# previous turn's tokens and never attributes the last one at all.
+
+#: Provenance labels for where `llm_turn_id` came from. Core's
+#: `provenance` is an open-valued `List[str]` (`schema/events.py:221`)
+#: whose convention is a lowercase source-kind label naming the origin of
+#: the recorded material — `"tool_output"` and `"claude_code_transcript"`
+#: are shipped examples (`wrapper/langchain_adapter.py:635`,
+#: `wrapper/claude_code_hook.py:984`). These follow that convention; they
+#: do not introduce a new one.
+PROVIDER_TURN_ID = "provider_response_id"
+LOCAL_TURN_ID = "pydantic_ai_governor_run_step"
+
+
+@dataclass(frozen=True)
+class TurnEvidence:
+    """One model turn's measured usage and identity.
+
+    Everything optional here is optional *because core omits None and
+    preserves 0* (`ContextSnapshotPayload.serialize_with_token_omission`).
+    That distinction is load-bearing: absence means the framework reported
+    nothing, and zero means it reported none. Neither is manufactured from
+    the other.
+    """
+
+    llm_turn_id: str
+    context_size_tokens: int
+    provenance: List[str]
+    llm_prompt_tokens: Optional[int] = None
+    llm_completion_tokens: Optional[int] = None
+    llm_cached_read_tokens: Optional[int] = None
+    llm_cached_write_tokens: Optional[int] = None
+    model_identifier: Optional[str] = None
+    provider: Optional[str] = None
+    tool_use_ids: Optional[List[str]] = None
+
+    @property
+    def turn_id_is_provider_issued(self) -> bool:
+        return PROVIDER_TURN_ID in self.provenance
+
+
+def turn_identity(response: Any, run_step: Any) -> Tuple[str, List[str]]:
+    """This turn's `llm_turn_id` and the provenance that explains it.
+
+    Prefers the provider's own `provider_response_id`. When the provider
+    issued none, falls back to a local ``run_step:<n>`` built from
+    ``ctx.run_step``.
+
+    **The fallback is never presented as provider-issued.** Which of the
+    two happened is recorded positively in `provenance`, and *both*
+    branches are labelled rather than only the local one: if absence were
+    the signal for "provider-issued", a dropped field or an older writer
+    would read as a provider claim we never made.
+    """
+    provider_id = getattr(response, "provider_response_id", None)
+    if isinstance(provider_id, str) and provider_id:
+        return provider_id, [PROVIDER_TURN_ID]
+    step = run_step if isinstance(run_step, int) else 0
+    return f"run_step:{step}", [LOCAL_TURN_ID]
+
+
+def issued_tool_use_ids(response: Any) -> Optional[List[str]]:
+    """The tool-call ids this response issued, in response order.
+
+    This is the join `build_token_snapshot` exists to carry: its contract
+    says the snapshot records "the ``tool_use_ids`` that turn issued" and
+    that analyzers join live tool-call violations against them
+    (`event_builder/builder.py:487-497`). **Core's field is the join
+    mechanism; the integration does not build a second one.**
+
+    Ids are read off the parts and never inferred or synthesized. A turn
+    that issued no tool calls returns ``None``, which is core's absence
+    representation — the serializer omits None and preserves 0/empty, so
+    an empty list would instead assert "this turn issued exactly zero
+    tools" on every text-only turn.
+    """
+    ids: List[str] = []
+    for part in getattr(response, "parts", None) or []:
+        if getattr(part, "part_kind", None) != "tool-call":
+            continue
+        call_id = getattr(part, "tool_call_id", None)
+        if isinstance(call_id, str) and call_id:
+            ids.append(call_id)
+    return ids or None
+
+
+def _reported(usage: Any, name: str) -> Optional[int]:
+    """A measured count, or None when the framework reported nothing.
+
+    Never estimated, derived or recomputed. A reported ``0`` passes
+    through as ``0`` because core preserves zero as a real measurement; a
+    missing attribute becomes None so core omits the field entirely.
+    """
+    value = getattr(usage, name, None)
+    return value if isinstance(value, int) else None
+
+
+def read_turn(response: Any, run_step: Any = None) -> TurnEvidence:
+    """Everything CP6 records about one model turn.
+
+    `context_size_tokens` is the **measured** ``usage.input_tokens``, not
+    the CP5 estimator: the field is required and non-nullable
+    (`schema/events.py:223`), and where the provider reported the actual
+    input size an estimate would be strictly less truthful.
+
+    **`llm_prompt_tokens` deliberately carries the same number.** They are
+    one measurement seen through two names, and inventing a different
+    estimate to make them differ would put a false reading on the event.
+
+    When the framework reported no usage at all, `context_size_tokens`
+    falls back to ``0`` only because the field cannot be omitted. The
+    optional token fields go absent in that case, so the two together say
+    "nothing was reported" rather than "zero tokens were used". Estimating
+    a substitute here is not an option the plan allows.
+    """
+    usage = getattr(response, "usage", None)
+    turn_id, provenance = turn_identity(response, run_step)
+    input_tokens = _reported(usage, "input_tokens")
+    return TurnEvidence(
+        llm_turn_id=turn_id,
+        context_size_tokens=input_tokens if input_tokens is not None else 0,
+        provenance=provenance,
+        llm_prompt_tokens=input_tokens,
+        llm_completion_tokens=_reported(usage, "output_tokens"),
+        llm_cached_read_tokens=_reported(usage, "cache_read_tokens"),
+        llm_cached_write_tokens=_reported(usage, "cache_write_tokens"),
+        model_identifier=getattr(response, "model_name", None),
+        provider=getattr(response, "provider_name", None),
+        tool_use_ids=issued_tool_use_ids(response),
+    )

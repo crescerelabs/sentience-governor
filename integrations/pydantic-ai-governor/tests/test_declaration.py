@@ -138,7 +138,10 @@ async def test_undeclared_run_says_so_rather_than_inventing_one(isolated_home):
 
 async def test_registration_precedes_declaration(isolated_home):
     result = await run(SentienceGovernor(objective="o", scope=["crm"]))
-    order = [e["event_type"] for e in trace_events(isolated_home, result.run_id)]
+    order = [e["event_type"] for e in trace_events(isolated_home, result.run_id)
+             # CP6 token snapshots share the CONTEXT_SNAPSHOT type; this
+             # test is about what precedes what at session open.
+             if e["payload"].get("llm_turn_id") is None]
     assert order == ["AGENT_REGISTERED", "INTENT_DECLARED"]
 
 
