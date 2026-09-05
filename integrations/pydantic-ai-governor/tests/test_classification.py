@@ -99,7 +99,12 @@ class _Capture(SentienceGovernor):
         result = await super().wrap_tool_execute(
             ctx, call=call, tool_def=tool_def, args=args, handler=handler
         )
-        self.seen.append(self._classification)
+        # Resolved from the same input the capability resolves from,
+        # rather than read back off the instance. CP7 forbids per-call
+        # state on `self`, and a probe reaching for it would keep that
+        # state alive purely to be observed.
+        seen, _ = evidence.resolve(getattr(tool_def, "metadata", None))
+        self.seen.append(seen)
         return result
 
     def _written(self) -> List[dict]:

@@ -109,9 +109,13 @@ class SentienceGovernor(AbstractCapability[Any]):
         self._sink: Optional[SinkWriter] = None
         self._declaration: Declaration = self._default
         self._rejection: Optional[str] = None
-        # Most recent resolved classification, for the checkpoint that will
-        # emit evidence from it. Never keyed per call on `self`.
-        self._classification = evidence.Classification()
+        # Nothing per-CALL lives here, deliberately. A resolved
+        # classification, a tool name, a tool_use_id: each belongs to one
+        # call, and parallel tool calls in a single model response run
+        # concurrently on this same instance. Anything per-call on `self`
+        # is a race waiting for a second tool, so per-call values live in
+        # hook arguments and locals, keyed by `call.tool_call_id` where an
+        # identity is needed. A test asserts this holds.
 
     # -- Pydantic AI listing identity -------------------------------------
     @staticmethod
@@ -186,7 +190,6 @@ class SentienceGovernor(AbstractCapability[Any]):
         classification, rejection = evidence.resolve(
             getattr(tool_def, "metadata", None)
         )
-        self._classification = classification
         if rejection is not None:
             # D2: a configuration-contract failure, not a policy decision.
             # It says the metadata did not parse and makes no claim about
