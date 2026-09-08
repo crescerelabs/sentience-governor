@@ -1,0 +1,60 @@
+name: pydantic-ai-governor-release
+
+# The release gates for the `pydantic-ai-governor` distribution.
+#
+# Triggered by that distribution's OWN tag namespace. The pattern cannot
+# match core's `v*`, because the integration prefix does not begin with `v`:
+# an integration tag never fires core's release gates, and a core tag never
+# fires this. `release-check.yml` keeps its own trigger, untouched.
+#
+# This job runs the REAL integration release check, the same script a human
+# runs locally. It is not a re-implementation of those gates in YAML: a
+# workflow that checked something subtly different from the script would
+# prove the wrong path.
+#
+# It publishes nothing. There is no PyPI credential here and none is needed.
+on:
+  push:
+    tags:
+      - "pydantic-ai-governor-v*"
+
+permissions:
+  contents: read
+
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The gates read repository state, including core's own metadata
+          # for the dependency-direction check. A shallow clone is fine for
+          # that, but full history keeps the tag's own commit resolvable.
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install core, the integration, and the build tooling
+        run: |
+          python -m pip install --upgrade pip
+          # Core from this tree, not PyPI: the gates must check the commit
+          # the tag points at, not whatever core release happens to be live.
+          python -m pip install -e .
+          python -m pip install -e "./integrations/pydantic-ai-governor[dev]"
+          python -m pip install build twine
+
+      - name: Report the tag and resolved environment
+        run: |
+          echo "tag: ${GITHUB_REF_NAME}"
+          python -c "import sys; print('python', sys.version)"
+          python -m pip show pydantic-ai-slim sentience-governor \
+            | grep -E "^(Name|Version):"
+
+      # The real script, by path. If this file is ever replaced by inline
+      # steps, the workflow stops proving the release path and starts
+      # proving itself.
+      - name: Run the integration release gates
+        run: python integrations/pydantic-ai-governor/scripts/release_check.py

@@ -8,7 +8,10 @@ repository root's.
 
 from __future__ import annotations
 
-import tomllib
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10 has no stdlib tomllib
+    import tomli as tomllib
 from importlib.metadata import metadata, version
 from pathlib import Path
 

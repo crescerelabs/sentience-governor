@@ -16,7 +16,10 @@ that confirmation, in a form that keeps holding after CP10 lands.
 from __future__ import annotations
 
 import fnmatch
-import tomllib
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10 has no stdlib tomllib
+    import tomli as tomllib
 from pathlib import Path
 from typing import List
 
@@ -110,33 +113,61 @@ def test_the_integration_tag_namespace_cannot_match_core():
 
 
 @repo_only
-def test_release_check_is_still_the_only_tag_triggered_workflow():
-    """CP10 adds the second one. Until then, this pins the finding.
+def test_exactly_two_tag_triggered_workflows_exist():
+    """Updated at CP10, deliberately, from "only core" to "core and ours".
 
-    When CP10 lands, this test is what tells the implementer that the
-    landscape changed, rather than the change passing unremarked.
+    At CP8 this asserted `["release-check.yml"]`, so that CP10 landing its
+    workflow could not pass unremarked. CP10 landed it, and the guard is
+    re-pointed rather than removed: a THIRD tag-triggered workflow, or the
+    loss of either of these, still fails here.
     """
     tagged: List[str] = []
     for path in sorted(WORKFLOWS.glob("*.yml")):
-        text = path.read_text()
         # Cheap and deliberate: a `tags:` key under a `push:` trigger.
-        if "tags:" in text:
+        if "tags:" in path.read_text():
             tagged.append(path.name)
 
-    assert tagged == ["release-check.yml"], (
-        f"tag-triggered workflows changed: {tagged}. If CP10 added the "
-        f"integration workflow, update this test to expect both.")
+    assert tagged == ["pydantic-ai-governor-release.yml",
+                      "release-check.yml"], (
+        f"tag-triggered workflows changed: {tagged}")
 
 
 @repo_only
-def test_cp8_introduced_no_release_machinery():
-    """Rev 9 forbids it here, including any inline substitute.
+def test_the_ci_job_still_carries_no_release_gating():
+    """The half of the CP8 guard that still holds, and must keep holding.
 
-    A throwaway approximation of CP10's gates would read as coverage while
-    proving a path that CP10 then deletes.
+    CP8's version asserted that NO release machinery existed anywhere. CP10
+    landed that machinery, so the assertion narrows rather than disappears:
+    the per-commit CI job must still not fire on tags or run release gates.
+    Those belong to the tag workflow, and a CI job that started doing them
+    would gate every push on a release check.
     """
-    assert not (PROJECT_ROOT / "scripts" / "release_check.py").exists()
-    assert not (PROJECT_ROOT / "CHANGELOG.md").exists()
     workflow = (WORKFLOWS / "integration-pydantic-ai.yml").read_text()
-    assert "tags:" not in workflow, "CP8 fires no tag workflow"
-    assert "twine" not in workflow, "release gating is CP10's, not CP8's"
+    assert "tags:" not in workflow, "the CI job fires on branches, not tags"
+    assert "twine" not in workflow, "release gating belongs to the tag workflow"
+
+
+@repo_only
+def test_cp10_release_machinery_is_present_and_wired():
+    """The inverse of the CP8 guard, kept as a guard.
+
+    CP8 asserted these did not exist. Deleting that assertion at CP10 would
+    have left nothing checking they arrived, so it is inverted instead.
+    """
+    assert (PROJECT_ROOT / "scripts" / "release_check.py").exists()
+    assert (PROJECT_ROOT / "CHANGELOG.md").exists()
+
+    workflow = (WORKFLOWS / "pydantic-ai-governor-release.yml").read_text()
+    assert f'"{INTEGRATION_TAG_GLOB}"' in workflow, "wrong trigger pattern"
+    # The workflow must invoke the real script, never a re-implementation.
+    assert "scripts/release_check.py" in workflow, (
+        "the tag workflow must run the real release check, not inline steps")
+
+
+@repo_only
+def test_the_core_release_workflow_is_untouched_by_cp10():
+    """A non-goal, enforced: core keeps its own trigger and its own gates."""
+    core = (WORKFLOWS / "release-check.yml").read_text()
+    assert '- "v*"' in core, "core's trigger changed"
+    assert "pydantic" not in core.lower(), (
+        "the core release workflow must stay unaware of this distribution")
