@@ -29,6 +29,7 @@ pages, no build step, no site-generator frontmatter.
 | `changelog.md` | User-facing release notes |
 | `integrations/langchain.md` | LangChain / LangGraph |
 | `integrations/mcp.md` | MCP-style clients |
+| `integrations/pydantic-ai.md` | Pydantic AI (separate distribution) |
 | `guide/sentience_governor.md` | The full operator manual |
 | `guide/README.md` | Index for the manual |
 | `install-pre-release.md` | **Deliberately unlinked** from `index.md`; handed to testers directly |

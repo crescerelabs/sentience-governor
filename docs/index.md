@@ -59,6 +59,7 @@ Trace = all events for a session
 
 - **[LangChain](./integrations/langchain.md)** — callback handler and middleware.
 - **[MCP](./integrations/mcp.md)** — wrapping an MCP-style client.
+- **[Pydantic AI](./integrations/pydantic-ai.md)** — the `pydantic-ai-governor` capability.
 
 ### Going deeper
 
