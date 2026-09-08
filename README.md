@@ -14,6 +14,7 @@ happened.
 [![Python](https://img.shields.io/pypi/pyversions/sentience-governor.svg)](https://pypi.org/project/sentience-governor/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://github.com/crescerelabs/sentience-governor/blob/main/LICENSE)
 [![test](https://github.com/crescerelabs/sentience-governor/actions/workflows/test.yml/badge.svg)](https://github.com/crescerelabs/sentience-governor/actions/workflows/test.yml)
+[![Governor's Log](https://img.shields.io/badge/Governor's%20Log-read-1f6feb.svg)](https://getsentience.ai/governor-log)
 
 No account, no API key. By default, your traces stay on your machine.
 
@@ -23,7 +24,7 @@ No account, no API key. By default, your traces stay on your machine.
 | Category | AI agent runtime governance and execution recording |
 | Execution architecture | Execution-boundary hook, plus an opt-in local MCP server (stdio) |
 | Core artifact | Sentience Agent Execution Record (local event stream) |
-| Integrations | Claude Code, MCP clients, LangChain, LangGraph |
+| Integrations | Claude Code, MCP clients, LangChain, LangGraph; Pydantic AI via a separate distribution |
 | Default stance | Observe-only, fail-open, no telemetry, local-first |
 
 ![Sentience Governor: an agent's declared intent on the left, its runtime actions on the right, each marked within scope, outside scope, or a policy violation, with token spend attributed to each action](https://raw.githubusercontent.com/crescerelabs/sentience-governor/main/docs/assets/demo.gif)
@@ -44,23 +45,15 @@ many distinct files the writes touched, not just how many write operations
 there were, which is the difference between many edits to one file and one edit
 to many. Local and read-only, as before.
 
-**0.3.1.1** gives the retrospective review an evidence path. The summary in
-0.3.1 could tell you a session wrote into another project directory, and how
-many times, and then stopped; `sentience scan --detail` now shows the paths
-behind that number,
-grouped by session, and the summary names that path itself so it is not
-something you have to discover from `--help`. The same review and the same
-evidence are available through the opt-in MCP server, so you can ask for them
-inside a Claude Code session and get the evidence back in the conversation.
+**Pydantic AI support ships as its own distribution.**
+[`pydantic-ai-governor`](https://github.com/crescerelabs/sentience-governor/tree/main/integrations/pydantic-ai-governor)
+0.1.0 adds a Pydantic AI capability: attach it to an agent and each run opens
+its own Sentience Governor session, recording what the agent dispatched
+against the declaration state recorded before the run, with measured per-turn
+token usage. It installs separately, versions separately, and Sentience
+Governor itself takes on no Pydantic AI dependency.
 
-Same scan, same window, same findings: `--detail` is depth, never a broader
-search. Local and read-only, as before.
-
-**0.3.1** added `sentience scan` — a retrospective review of the Claude Code
-history already on your machine, reporting which sessions recorded write
-activity outside the project they were working in, before you have declared an
-intent or instrumented anything. The same review is available inside Claude
-Code as `/sentience-review`. Full detail in the
+Earlier releases, in full, are in the
 [changelog](https://github.com/crescerelabs/sentience-governor/blob/main/CHANGELOG.md).
 
 ---
@@ -408,6 +401,7 @@ sentience demo declare-intent     # the POL-001 before/after flip
 | **Full docs** | [docs/index.md](https://github.com/crescerelabs/sentience-governor/blob/main/docs/index.md) |
 | **Changelog** | [CHANGELOG.md](https://github.com/crescerelabs/sentience-governor/blob/main/CHANGELOG.md) |
 | **Examples** | [examples/](https://github.com/crescerelabs/sentience-governor/tree/main/examples/) |
+| **Governor's Log** | [getsentience.ai/governor-log](https://getsentience.ai/governor-log) |
 
 ---
 

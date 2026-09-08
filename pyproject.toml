@@ -110,7 +110,10 @@ where = ["."]
 # below is belt-and-suspenders: even if the include allowlist is ever
 # loosened, these directories must remain out of the package.
 include = ["sentience_governor*"]
-exclude = ["examples*", "tests*", "docs*", "server*"]
+# integrations/ holds independently packaged, independently published
+# distributions (e.g. pydantic-ai-governor). They are never part of the
+# core wheel or sdist: each builds and ships from its own pyproject.
+exclude = ["examples*", "tests*", "docs*", "server*", "integrations*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
