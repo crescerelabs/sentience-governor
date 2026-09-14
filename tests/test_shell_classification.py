@@ -268,9 +268,34 @@ class TestNormalization:
         assert _effects_of_cmd("pip3 install requests") == [("network", "read", False), ("packages", "modify", False)]
 
     def test_assignments_and_wrappers(self):
-        assert _segments_of(classify_shell_command("A=1 B=2 sudo -n env C=3 nohup make")) == [("make", None, [("process", "execute", None)])]
+        assert _segments_of(classify_shell_command("A=1 B=2 sudo env C=3 nohup make")) == [("make", None, [("process", "execute", None)])]
         assert classify_shell_command("A=1").segments == []
         assert _segments_of(classify_shell_command("A=$(x)")) == [("A=", None, [("unknown", "unknown", None)])]
+
+    @pytest.mark.parametrize("cmd,wrapper", [
+        ("sudo -u root make", "sudo"),
+        ("env -u FOO make", "env"),
+        ("nice -n 10 make", "nice"),
+        ("time -p make", "time"),
+        ("nohup -- make", "nohup"),
+        ("command -v make", "command"),
+        ("sudo --preserve-env=PATH rm -rf /tmp/x", "sudo"),
+        ("A=1 sudo -n env B=2 nohup make", "sudo"),
+        ("sudo env -i make", "env"),
+    ])
+    def test_wrapper_option_syntax_is_unknown_never_an_operand(self, cmd, wrapper):
+        """F-6: a transparent wrapper followed by option syntax is not parsed.
+        The segment is an explicit unknown named for the wrapper; no option
+        operand (root, FOO, 10, -p, make after an option) is ever reported."""
+        obj = classify_shell_command(cmd)
+        assert _segments_of(obj) == [(wrapper, None, [("unknown", "unknown", None)])], cmd
+        assert obj.complete is False and obj.destructive is None
+        assert not any(s[0] in ("root", "FOO", "10", "-p", "-u", "-n", "--", "-v", "-i", "make", "rm") for s in _segments_of(obj))
+
+    def test_bare_wrappers_still_stripped(self):
+        for cmd in ("sudo make", "env make", "time make", "nohup make", "nice make", "command make", "sudo env FOO=1 time nice nohup command make"):
+            assert _segments_of(classify_shell_command(cmd)) == [("make", None, [("process", "execute", None)])], cmd
+        assert _segments_of(classify_shell_command("sudo -u root make > out.log")) == [("sudo", None, [("unknown", "unknown", None), ("filesystem", "modify", None)])]
 
     def test_git_global_options_with_values(self):
         assert _segments_of(classify_shell_command("git -c core.pager=cat --no-pager -C /tmp status"))[0] == ("git", "status", [("version_control", "read", False)])

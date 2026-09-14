@@ -36,6 +36,12 @@ CP4-D fixture corpus is the oracle):
   substring or hyphen-word inference is performed.
 * **Neutral commands** (``cd``, ``echo``, ``export`` ...) produce no segment
   unless they carry a material redirection or an unsupported construct.
+* **Transparent wrappers** (``sudo env time nohup nice command exec``) are
+  stripped when bare, and ``env``'s ``VAR=value`` arguments with them. A
+  wrapper followed by option syntax (``sudo -u root make``) is not parsed:
+  its operand structure is not modelled, so the segment is an explicit
+  unknown named for the wrapper and no operand is ever reported as the
+  executable.
 * **Redirections** are material filesystem effects on the segment they
   attach to; descriptor duplication, heredocs and herestrings are not.
   **Amendment 2:** the literal output target ``/dev/null`` is a sink and
@@ -767,8 +773,14 @@ def _classify_segment(raw: str) -> Optional[Tuple[str, Optional[str], List[Effec
             if wv.value == "exec" and idx + 1 >= len(words):
                 break  # bare exec: not a wrapper use
             idx += 1
-            while idx < len(words) and words[idx].value.startswith("-") and not words[idx].construct:
-                idx += 1
+            if idx < len(words) and words[idx].value.startswith("-"):
+                # Wrapper option syntax (`sudo -u root make`, `env -u FOO make`,
+                # `nice -n 10 make`, `time -p make`): the operand structure is
+                # not modelled in v0.3.2, so the classifier must not skip
+                # tokens and guess which word is the real executable. The
+                # segment is an explicit unknown named for the wrapper; no
+                # option operand is ever reported as the executable.
+                return wv.value, None, [UNKNOWN] + _redirection_effects(seg)
             continue
         break
     rest = words[idx:]
