@@ -95,6 +95,7 @@ from sentience_governor.event_builder.builder import EventBuilder
 from sentience_governor.profile import GovernanceProfile
 from sentience_governor.profile.resolver import ResolvedProfile, resolve_profile
 from sentience_governor.schema.events import (
+    OperationClassification,
     ClassificationSource,
     DeploymentMode,
     DetectionMechanism,
@@ -111,6 +112,10 @@ from sentience_governor.wrapper.token_extraction import (
     extract_anthropic_usage,
 )
 from sentience_governor.wrapper.claude_code_transcript import parse_transcript_file
+from sentience_governor.wrapper.shell_classification import (
+    classify_shell_command,
+    target_system_for,
+)
 from sentience_governor.session_manager.resumption import (
     Registration,
     ResumedState,
@@ -310,6 +315,31 @@ def _resolve_deployment_mode() -> DeploymentMode:
             _DEFAULT_DEPLOYMENT_MODE.value,
         )
         return _DEFAULT_DEPLOYMENT_MODE
+
+
+_BASH_TOOL_NAME = "Bash"
+
+
+def _classify_bash_call(ctx: "_HookContext") -> Tuple[Optional[OperationClassification], str]:
+    """v0.3.2: ``(operation_classification, target_system)`` for a tool call.
+
+    Bash calls are classified from ``tool_input.command`` by the pure
+    classifier; the coarse ``target_system`` is derived from the result
+    (``shell`` or ``shell/<domain>``). A missing or non-string command is
+    still classified (to an explicit unknown), so every Bash SCOPE_ASSERTED
+    carries the object. Non-Bash calls return ``(None, <legacy target>)``.
+    Fail-open: any defect here degrades to the legacy ``shell`` target with
+    no classification rather than preventing the event.
+    """
+    _op, legacy_target = _infer_tool_mapping(ctx.tool_name)
+    if ctx.tool_name != _BASH_TOOL_NAME:
+        return None, legacy_target
+    try:
+        classification = classify_shell_command(ctx.tool_input.get("command"))
+        return classification, target_system_for(classification)
+    except Exception as exc:  # pragma: no cover - the classifier never raises
+        logger.warning("claude_code_hook: shell classification failed: %s", exc)
+        return None, legacy_target
 
 
 def _infer_tool_mapping(tool_name: str) -> Tuple[OperationType, str]:
@@ -1093,7 +1123,10 @@ class ClaudeCodeGovernanceHook:
     def _emit_pre_tool(
         self, builder: EventBuilder, sink: SinkWriter, ctx: _HookContext
     ) -> None:
-        op_type, target_system = _infer_tool_mapping(ctx.tool_name)
+        op_type, _legacy_target = _infer_tool_mapping(ctx.tool_name)
+        # v0.3.2: Bash calls carry the semantic classification and derive
+        # the richer target from it; operation_type stays EXECUTE.
+        classification, target_system = _classify_bash_call(ctx)
 
         scope_event = builder.build_scope_asserted(
             tool_id=ctx.tool_name,
@@ -1102,6 +1135,7 @@ class ClaudeCodeGovernanceHook:
             operation_type=op_type,
             authorization_claim=None,
             tool_use_id=ctx.tool_use_id,
+            operation_classification=classification,
         )
         if scope_event:
             sink.write(scope_event, ctx.session_id)
@@ -1147,7 +1181,9 @@ class ClaudeCodeGovernanceHook:
     def _emit_post_tool(
         self, builder: EventBuilder, sink: SinkWriter, ctx: _HookContext
     ) -> None:
-        _op_type, target_system = _infer_tool_mapping(ctx.tool_name)
+        # v0.3.2: the post-call snapshot's provenance uses the same
+        # classification-derived target as the pre-call pair.
+        _classification, target_system = _classify_bash_call(ctx)
         ctx_event = builder.build_context_snapshot(
             data_classifications=[],
             classification_source=ClassificationSource.unclassified,

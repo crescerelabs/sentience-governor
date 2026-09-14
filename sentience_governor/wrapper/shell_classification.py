@@ -253,6 +253,26 @@ def classify_shell_command(command: Any) -> OperationClassification:
         return _unknown_classification(first)
 
 
+def target_system_for(classification: OperationClassification) -> str:
+    """Coarse compatibility ``target_system`` for a Bash call (locked §9).
+
+    ``shell/<domain>`` iff the classification is ``complete`` and exactly one
+    distinct domain appears across every effect of every segment; otherwise
+    ``shell``. Any unknown effect (and therefore any unsupported nesting)
+    forces ``shell``; zero effects (a fully neutral command) is ``shell``.
+    The classification object stays authoritative; this string is the
+    legacy surface consumed by scope hints, the ``tools`` regex composite
+    and the task-boundary namespace guard.
+    """
+    try:
+        domains = {e.domain for s in classification.segments for e in s.effects}
+        if classification.complete and len(domains) == 1:
+            return f"shell/{next(iter(domains))}"
+    except Exception:
+        pass
+    return "shell"
+
+
 def split_segments(command: str) -> List[str]:
     """Top-level segments of ``command`` in order (raw text, stripped).
 

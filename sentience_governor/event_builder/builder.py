@@ -46,6 +46,7 @@ from sentience_governor.schema.events import (
     IntentSource,
     InterceptStage,
     MemoryWriteAttemptPayload,
+    OperationClassification,
     OperationType,
     PolicyViolation,
     PrimitiveType,
@@ -56,6 +57,9 @@ from sentience_governor.profile.schema import (
     DEMAND_AT_FIRST_WRITE,
     DEMAND_AT_NEVER,
     DEMAND_AT_SESSION_START,
+    OPERATION_ACTIONS,
+    OPERATION_DOMAINS,
+    OPERATION_RULE_KEYS,
     SIGNAL_DIR_CHANGE,
     SIGNAL_FILE_TYPE_SHIFT,
     SIGNAL_READ_TO_WRITE_TRANSITION,
@@ -162,6 +166,60 @@ def _now_utc() -> str:
 # v0.2.5 — task-boundary signal helpers (pure functions)
 # ---------------------------------------------------------------------------
 
+_SHELL_NAMESPACE = "shell"
+
+
+def _is_shell_target(target_system: str) -> bool:
+    return target_system == _SHELL_NAMESPACE or target_system.startswith(_SHELL_NAMESPACE + "/")
+
+
+def _valid_operation_rule(rule: object) -> bool:
+    """Runtime mirror of the loader's ``high_consequence.operations``
+    validation: a malformed rule is skipped, never raised on."""
+    if not isinstance(rule, dict):
+        return False
+    for key in rule:
+        if key not in OPERATION_RULE_KEYS:
+            return False
+    for key, vocabulary in (("domain", OPERATION_DOMAINS), ("action", OPERATION_ACTIONS)):
+        if key in rule:
+            raw = rule[key]
+            members = raw if isinstance(raw, list) else [raw]
+            if not members:
+                return False
+            if any(not isinstance(m, str) or m not in vocabulary for m in members):
+                return False
+    if "destructive" in rule and not isinstance(rule["destructive"], bool):
+        return False
+    return True
+
+
+def _operation_rule_matches(rule: dict, classification: OperationClassification) -> bool:
+    """A rule matches iff at least ONE single ClassifiedEffect, in any
+    segment, satisfies EVERY predicate the rule specifies.
+
+    ``domain`` / ``action`` values or lists are sets. ``destructive: true``
+    is satisfied only by ``True`` and ``false`` only by ``False``; a ``None``
+    effect satisfies neither. Predicates are never combined across
+    effects: the domain of one effect and the destructiveness of another
+    can never together satisfy a rule. A rule with no predicates matches
+    any effect (validation warns about it).
+    """
+    def as_set(v):
+        return set(v) if isinstance(v, list) else {v}
+
+    for segment in classification.segments:
+        for effect in segment.effects:
+            if "domain" in rule and effect.domain not in as_set(rule["domain"]):
+                continue
+            if "action" in rule and effect.action not in as_set(rule["action"]):
+                continue
+            if "destructive" in rule and effect.destructive is not rule["destructive"]:
+                continue
+            return True
+    return False
+
+
 def _extract_dir(target_system: str, depth: int) -> Optional[str]:
     """Return a directory key for a target_system string at the given depth.
 
@@ -175,6 +233,12 @@ def _extract_dir(target_system: str, depth: int) -> Optional[str]:
     """
     if not target_system:
         return None
+    if _is_shell_target(target_system):
+        # v0.3.2 namespace guard: every Bash target (`shell`,
+        # `shell/<domain>`) is the single `shell` namespace. A change of
+        # semantic subtype (`shell/version_control` → `shell/filesystem`)
+        # is not a directory move; Bash → Edit still crosses as before.
+        return _SHELL_NAMESPACE
     parts = re.split(r"[/.]", target_system)
     # Strip empty parts (leading slash, trailing slash)
     parts = [p for p in parts if p]
@@ -193,6 +257,8 @@ def _extract_file_ext(target_system: str) -> Optional[str]:
     """
     if not target_system:
         return None
+    if _is_shell_target(target_system):
+        return None  # v0.3.2 namespace guard: a domain token is never an extension
     # Last path component (handle slashes)
     last = target_system.rsplit("/", 1)[-1]
     if "." not in last:
@@ -405,13 +471,19 @@ class EventBuilder:
         timestamp_utc: Optional[str] = None,
         event_id: Optional[str] = None,
         tool_use_id: Optional[str] = None,
+        operation_classification: Optional[OperationClassification] = None,
     ) -> Optional[GovernanceEvent]:
+        # v0.3.2: the semantic classification of a shell command, when the
+        # adapter classified one (Claude Code Bash calls). Optional and
+        # None-omitted; `operation_type` and `target_system` are supplied
+        # by the caller exactly as before.
         payload = ScopeAssertedPayload(
             tool_id=tool_id,
             asserted_permissions=asserted_permissions,
             target_system=target_system,
             operation_type=operation_type,
             tool_use_id=tool_use_id,
+            operation_classification=operation_classification,
         )
         flags, violations = self._eval_scope(payload, authorization_claim)
         # v0.2.5: apply profile-driven transforms (POL-001 gating,
@@ -710,6 +782,9 @@ class EventBuilder:
            ``tool_id:target_system`` composite matches any regex in
            ``high_consequence.tools``, append
            ``HIGH_CONSEQUENCE_DETECTED``.
+        3b. (v0.3.2) High-consequence operations rules — when one single
+           classified effect satisfies every predicate of a rule in
+           ``high_consequence.operations``, append the same flag.
 
         After the transforms, the per-session task-boundary state is
         updated to reflect the current event (so the NEXT event sees
@@ -804,6 +879,28 @@ class EventBuilder:
                     # Skip silently — validation surfaces this at load
                     # time; runtime is not the place to crash.
                     continue
+
+        # ---- Transform 3b (v0.3.2): per-effect operations rules ----
+        # Only when the event carries a classification. Each rule is
+        # tested against one ClassifiedEffect at a time (never a
+        # combination of fields from separate effects). A match raises
+        # the same HIGH_CONSEQUENCE_DETECTED flag as the `tools` regex,
+        # deduplicated with it; on_match stays "flag"; malformed rules
+        # are skipped as validation promised.
+        hc_ops = high_consequence.get("operations") or []
+        classification = payload.operation_classification
+        if hc_ops and classification is not None:
+            for rule in hc_ops:
+                if not _valid_operation_rule(rule):
+                    continue
+                try:
+                    matched = _operation_rule_matches(rule, classification)
+                except Exception:
+                    continue
+                if matched:
+                    if AdvisoryFlag.HIGH_CONSEQUENCE_DETECTED not in out_flags:
+                        out_flags.append(AdvisoryFlag.HIGH_CONSEQUENCE_DETECTED)
+                    break
 
         return out_flags, out_violations
 
