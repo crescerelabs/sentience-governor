@@ -831,6 +831,8 @@ class ClaudeCodeGovernanceHook:
                 agent_id=agent_id,
                 session_id=session_id,
                 deployment_mode=deployment_mode,
+                profile_resolution=bound.resolution,
+                profile_binding=bound.binding,
             )
             event = builder.build_intent_declared(
                 stated_objective=stated_objective,
@@ -934,6 +936,10 @@ class ClaudeCodeGovernanceHook:
                 agent_id=ctx.agent_id,
                 session_id=ctx.session_id,
                 deployment_mode=ctx.deployment_mode,
+                # v0.3.2: registration provenance (bound/degraded only;
+                # the builder omits it for default/none).
+                profile_resolution=bound.resolution,
+                profile_binding=bound.binding,
             )
 
             is_first_event = resumed is None

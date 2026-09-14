@@ -112,6 +112,11 @@ def env(tmp_path: Path, monkeypatch) -> Env:
     monkeypatch.setattr(loader_module, "DEFAULT_RESOLUTION_PATH", e.resolution)
     monkeypatch.setattr(loader_module, "DEFAULT_PROFILE_PATH", e.default)
     monkeypatch.delenv("SENTIENCE_CLAUDE_CODE_AGENT_ID_PREFIX", raising=False)
+    # The read-only CLI (`sentience profile resolve --session-id`,
+    # `profile snapshots`) locates traces the way the hook does: through
+    # the env var and the fallback directory. Point both at temp space.
+    monkeypatch.setenv("SENTIENCE_CLAUDE_CODE_SINK_PATH", str(e.sink_base))
+    monkeypatch.setattr(cch, "_FALLBACK_SINK_DIR", tmp_path / "fallback")
     return e
 
 

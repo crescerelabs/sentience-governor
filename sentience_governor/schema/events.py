@@ -177,10 +177,26 @@ class AgentRegisteredPayload(BaseModel):
     profile_loaded: Optional[bool] = None
     profile_schema_version: Optional[int] = None
 
+    # v0.3.2 — per-session policy resolution provenance. Recorded only
+    # when the session resolved through ~/.sentience/resolution.yaml:
+    # ``profile_resolution`` is "bound" or "degraded" and
+    # ``profile_binding`` is the matched agent_id pattern. Sessions on
+    # the machine default or on no profile omit both, so their
+    # registrations are byte-identical to v0.3.1.2. The full content
+    # hash is never recorded here; the envelope carries the 12-hex
+    # fingerprint only.
+    profile_resolution: Optional[str] = None
+    profile_binding: Optional[str] = None
+
     @model_serializer(mode="wrap")
     def serialize_with_profile_omission(self, default_handler):
         raw = default_handler(self)
-        for field in ("profile_loaded", "profile_schema_version"):
+        for field in (
+            "profile_loaded",
+            "profile_schema_version",
+            "profile_resolution",
+            "profile_binding",
+        ):
             if raw.get(field) is None:
                 raw.pop(field, None)
         return raw

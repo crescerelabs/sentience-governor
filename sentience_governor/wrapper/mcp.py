@@ -520,9 +520,8 @@ class _WrappedMCPSession:
         # default → none). One process per session, so the object stored
         # by session_start is sticky by construction. None keeps the
         # pre-profile code path (no transforms, no profile metadata).
-        profile: Optional[GovernanceProfile] = resolve_profile(
-            agent_id=self._agent_id
-        ).profile
+        resolved = resolve_profile(agent_id=self._agent_id)
+        profile: Optional[GovernanceProfile] = resolved.profile
         self._sm.session_start(
             session_id=self._session_id,
             agent_id=self._agent_id,
@@ -535,6 +534,8 @@ class _WrappedMCPSession:
             agent_id=self._agent_id,
             session_id=self._session_id,
             deployment_mode=self._deployment_mode,
+            profile_resolution=resolved.source,
+            profile_binding=resolved.binding,
         )
 
         # AGENT_REGISTERED

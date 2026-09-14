@@ -65,6 +65,13 @@ from sentience_governor.session_manager.manager import SessionManager
 
 logger = logging.getLogger(__name__)
 
+# v0.3.2: the resolver outcomes whose provenance is recorded on
+# AGENT_REGISTERED (resolver.SOURCE_BOUND / SOURCE_DEGRADED). "default"
+# and "none" are omitted so those registrations stay byte-identical to
+# v0.3.1.2. Literal strings here keep this module free of a resolver
+# import; the resolver's constants are pinned equal by test.
+PROVENANCE_RECORDED_RESOLUTIONS = frozenset(["bound", "degraded"])
+
 # ---------------------------------------------------------------------------
 # Policy: simulated_consequence strings (verbatim from spec / golden trace)
 # ---------------------------------------------------------------------------
@@ -281,12 +288,21 @@ class EventBuilder:
         agent_id: str,
         session_id: str,
         deployment_mode: DeploymentMode = DeploymentMode.vendor_managed,
+        profile_resolution: Optional[str] = None,
+        profile_binding: Optional[str] = None,
     ) -> None:
         self._sm = session_manager
         self._cache = cache
         self._agent_id = agent_id
         self._session_id = session_id
         self._deployment_mode = deployment_mode
+        # v0.3.2: how the session's profile was resolved (the resolver's
+        # ``ResolvedProfile.source`` and ``.binding``). Recorded on
+        # AGENT_REGISTERED only for "bound" and "degraded"; "default" and
+        # "none" (and callers that pass nothing) leave the registration
+        # exactly as v0.3.1.2 wrote it.
+        self._profile_resolution = profile_resolution
+        self._profile_binding = profile_binding
 
     # ------------------------------------------------------------------
     # Public factory methods (one per event type)
@@ -314,6 +330,13 @@ class EventBuilder:
             profile_loaded = True
             profile_schema_version = profile.schema_version  # type: ignore[attr-defined]
 
+        # v0.3.2: resolution provenance, recorded for bound/degraded only.
+        profile_resolution: Optional[str] = None
+        profile_binding: Optional[str] = None
+        if self._profile_resolution in PROVENANCE_RECORDED_RESOLUTIONS:
+            profile_resolution = self._profile_resolution
+            profile_binding = self._profile_binding
+
         payload = AgentRegisteredPayload(
             agent_id=self._agent_id,
             agent_version=agent_version,
@@ -324,6 +347,8 @@ class EventBuilder:
             policy_context=policy_context,
             profile_loaded=profile_loaded,
             profile_schema_version=profile_schema_version,
+            profile_resolution=profile_resolution,
+            profile_binding=profile_binding,
         )
         flags, violations = self._eval_registration(payload)
         return self._finalise(

@@ -501,9 +501,8 @@ class SentienceCallbackHandler:
         # v0.3.2: resolve the governing profile for this agent; sticky by
         # construction (one immutable object per root session). See
         # mcp.py._start for the rationale.
-        profile: Optional[GovernanceProfile] = resolve_profile(
-            agent_id=self._agent_id
-        ).profile
+        resolved = resolve_profile(agent_id=self._agent_id)
+        profile: Optional[GovernanceProfile] = resolved.profile
         self._sm.session_start(
             session_id=session_id,
             agent_id=self._agent_id,
@@ -521,6 +520,8 @@ class SentienceCallbackHandler:
             agent_id=self._agent_id,
             session_id=session_id,
             deployment_mode=self._deployment_mode,
+            profile_resolution=resolved.source,
+            profile_binding=resolved.binding,
         )
         root = _RootState(session_id=session_id, builder=builder)
         if key is _LEGACY_ROOT:

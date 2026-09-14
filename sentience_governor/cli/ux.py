@@ -51,7 +51,7 @@ import re
 import sys
 import time
 from collections import Counter, defaultdict
-from datetime import datetime
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
@@ -71,6 +71,8 @@ from sentience_governor.cli.first_run import maybe_run_first_run_flow
 from sentience_governor.cli.viewer import parse_events
 from sentience_governor.profile import GovernanceProfile
 from sentience_governor.profile.loader import DEFAULT_PROFILE_PATH
+from sentience_governor.profile.resolver import resolve_profile
+from sentience_governor.session_manager import resumption as _resumption
 
 # ---------------------------------------------------------------------------
 # Defaults — mirror what the Claude Code hook writes to.
@@ -2023,6 +2025,337 @@ def run_profile_init(args: argparse.Namespace) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# v0.3.2 — `sentience profile resolve` and `sentience profile snapshots`
+#
+# Read-only inspection of per-session policy resolution. Neither command
+# creates a directory, a sink, a sidecar, a snapshot or a binding; they
+# read the same files the Claude Code hook writes and report what the
+# runtime would do (``resolve --agent-id``), what it did for one session
+# (``resolve --session-id``), and what snapshot files exist
+# (``snapshots``). The runtime's own decisions live in
+# wrapper/claude_code_hook.py and session_manager/resumption.py; this
+# code mirrors the verification steps and never repairs anything.
+# ---------------------------------------------------------------------------
+
+RESOLVE_STATUS_OK = "OK"
+RESOLVE_STATUS_NO_BINDING = "NO_BINDING"
+RESOLVE_STATUS_SNAPSHOT_MISSING = "SNAPSHOT_MISSING"
+RESOLVE_STATUS_SNAPSHOT_CORRUPTED = "SNAPSHOT_CORRUPTED"
+RESOLVE_STATUS_BINDING_INVALID = "BINDING_INVALID"
+RESOLVE_STATUS_DISAGREES = "DISAGREES_WITH_REGISTRATION"
+RESOLVE_STATUS_NO_TRACE = "NO_TRACE"
+
+# Exit 0 for a healthy or never-bound session; exit 1 for every fault
+# (the `profile validate` convention).
+_RESOLVE_EXIT_ZERO = frozenset([RESOLVE_STATUS_OK, RESOLVE_STATUS_NO_BINDING])
+
+
+def _hook_sink_layout() -> Tuple[Path, bool, Path]:
+    """``(base, shared_file_mode, fallback_dir)`` exactly as the hook sees them.
+
+    Imported lazily so the CLI does not pay for the hook module unless a
+    session or snapshot lookup is requested. Nothing is created.
+    """
+    from sentience_governor.wrapper import claude_code_hook as _hook
+
+    base, shared = _hook._resolve_sink_base()
+    return base, shared, _hook._FALLBACK_SINK_DIR
+
+
+def _sink_candidates_for_session(session_id: str) -> List[Path]:
+    """Where the hook would have written ``session_id``'s trace, primary first."""
+    base, shared, fallback_dir = _hook_sink_layout()
+    primary = base if shared else base / f"{session_id}.jsonl"
+    return [primary, fallback_dir / f"{session_id}.jsonl"]
+
+
+def _snapshot_directories() -> List[Path]:
+    """Directories whose ``profiles/`` may hold snapshots: the active sink
+    directory, plus the fallback directory when it exists."""
+    base, shared, fallback_dir = _hook_sink_layout()
+    active = base.parent if shared else base
+    dirs = [active]
+    if fallback_dir.is_dir() and fallback_dir != active:
+        dirs.append(fallback_dir)
+    return dirs
+
+
+def _mtime_utc(path: Path) -> Optional[str]:
+    try:
+        stamp = path.stat().st_mtime
+    except OSError:
+        return None
+    return datetime.fromtimestamp(stamp, timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def _inspect_agent_resolution(agent_id: str) -> Dict[str, object]:
+    """What a NEW session for ``agent_id`` would resolve to. Pure read."""
+    resolved = resolve_profile(agent_id=agent_id)
+    profile = resolved.profile
+    source_path = None
+    fingerprint = None
+    content_hash = None
+    if profile is not None:
+        source_path = str(profile.source_path) if profile.source_path is not None else None
+        fingerprint = profile.fingerprint()
+        content_hash = profile.content_hash()
+    return {
+        "agent_id": agent_id,
+        "resolution": resolved.source,
+        "binding": resolved.binding,
+        "source_path": source_path,
+        "fingerprint": fingerprint,
+        "content_hash": content_hash,
+        "warnings": list(resolved.warnings),
+    }
+
+
+def _inspect_session_binding(session_id: str) -> Dict[str, object]:
+    """Read-only verification of one session's sticky binding (CP1-D §5
+    steps 3-8, without recovery). Returns the report fields plus
+    ``status``."""
+    report: Dict[str, object] = {
+        "session_id": session_id,
+        "trace": None,
+        "trace_last_append": None,
+        "resolution": None,
+        "binding": None,
+        "source_path": None,
+        "fingerprint": None,
+        "content_hash": None,
+        "snapshot": None,
+        "snapshot_verified": None,
+        "registration_fingerprint": None,
+        "registration_resolution": None,
+        "registration_binding": None,
+        "registration_agreement": None,
+        "bound_at": None,
+        "bound_by": None,
+        "recovered_from": None,
+        "status": None,
+    }
+
+    sink = next((p for p in _sink_candidates_for_session(session_id) if p.is_file()), None)
+    if sink is None:
+        report["status"] = RESOLVE_STATUS_NO_TRACE
+        return report
+    report["trace"] = str(sink)
+    report["trace_last_append"] = _mtime_utc(sink)
+
+    # Registration, read once; shown whatever the binding says.
+    registration = _resumption.read_registration(sink, session_id)
+    if registration.found:
+        report["registration_fingerprint"] = registration.profile_fingerprint
+        report["registration_resolution"] = registration.profile_resolution
+        report["registration_binding"] = registration.profile_binding
+
+    index = _resumption._read_sidecar(_resumption.sidecar_path_for(sink))
+    bucket = index.get(_resumption._SESSION_BINDING_KEY)
+    entry = bucket.get(session_id) if isinstance(bucket, dict) else None
+    if entry is None:
+        report["status"] = RESOLVE_STATUS_NO_BINDING
+        return report
+    if not _resumption._valid_binding_entry(entry):
+        report["status"] = RESOLVE_STATUS_BINDING_INVALID
+        return report
+
+    for key in ("resolution", "binding", "source_path", "fingerprint", "content_hash",
+                "snapshot", "bound_at", "bound_by", "recovered_from"):
+        source_key = {"fingerprint": "profile_fingerprint", "content_hash": "profile_content_hash"}.get(key, key)
+        report[key] = entry.get(source_key)
+
+    content_hash = entry.get("profile_content_hash")
+    if content_hash is not None:
+        snapshot_path = sink.parent / str(entry["snapshot"])
+        if not snapshot_path.is_file():
+            report["snapshot_verified"] = False
+            report["status"] = RESOLVE_STATUS_SNAPSHOT_MISSING
+            return report
+        try:
+            data = snapshot_path.read_bytes()
+        except OSError:
+            report["snapshot_verified"] = False
+            report["status"] = RESOLVE_STATUS_SNAPSHOT_MISSING
+            return report
+        if _resumption.content_hash_of(data) != content_hash:
+            report["snapshot_verified"] = False
+            report["status"] = RESOLVE_STATUS_SNAPSHOT_CORRUPTED
+            return report
+        try:
+            rebuilt = GovernanceProfile(
+                json.loads(data.decode("utf-8")),
+                source_path=Path(str(entry["source_path"])),
+            )
+            self_check = rebuilt.content_hash() == content_hash
+        except (ValueError, TypeError):
+            self_check = False
+        if not self_check:
+            report["snapshot_verified"] = False
+            report["status"] = RESOLVE_STATUS_SNAPSHOT_CORRUPTED
+            return report
+        report["snapshot_verified"] = True
+
+    # Registration agreement: fingerprint always; provenance when recorded.
+    if not registration.found:
+        report["registration_agreement"] = "(none)"
+        report["status"] = RESOLVE_STATUS_OK
+        return report
+    disagreements: List[str] = []
+    if registration.profile_fingerprint != entry.get("profile_fingerprint"):
+        disagreements.append("fingerprint")
+    if registration.has_provenance:
+        if registration.profile_resolution != entry.get("resolution"):
+            disagreements.append("profile_resolution")
+        if registration.profile_binding != entry.get("binding"):
+            disagreements.append("profile_binding")
+    if disagreements:
+        report["registration_agreement"] = "disagrees: " + ", ".join(disagreements)
+        report["status"] = RESOLVE_STATUS_DISAGREES
+    else:
+        report["registration_agreement"] = "agrees"
+        report["status"] = RESOLVE_STATUS_OK
+    return report
+
+
+def _fmt(value: object) -> str:
+    if value is None:
+        return "(none)"
+    if isinstance(value, bool):
+        return "yes" if value else "NO"
+    if isinstance(value, list):
+        return "(none)" if not value else "; ".join(str(v) for v in value)
+    return str(value)
+
+
+def run_profile_resolve(args: argparse.Namespace) -> int:
+    """``sentience profile resolve --agent-id ID | --session-id SID``.
+
+    READ-ONLY. ``--agent-id`` reports what a new session for that agent
+    would resolve to (exit 0 always; degraded and none are valid
+    answers). ``--session-id`` inspects an existing session's sticky
+    binding and snapshot and reports a diagnostic status: exit 0 for
+    OK and NO_BINDING, exit 1 for every other status.
+    """
+    as_json = bool(getattr(args, "json", False))
+    agent_id = getattr(args, "agent_id", None)
+    session_id = getattr(args, "session_id", None)
+
+    if agent_id:
+        report = _inspect_agent_resolution(agent_id)
+        if as_json:
+            print(json.dumps(report, indent=2, sort_keys=False))
+        else:
+            for key in ("agent_id", "resolution", "binding", "source_path",
+                        "fingerprint", "content_hash", "warnings"):
+                print(f"{key + ':':<14} {_fmt(report[key])}")
+        return 0
+
+    report = _inspect_session_binding(str(session_id))
+    if as_json:
+        print(json.dumps(report, indent=2, sort_keys=False))
+    else:
+        trace = _fmt(report["trace"])
+        if report["trace_last_append"]:
+            trace += f"   (last append {report['trace_last_append']})"
+        snapshot = _fmt(report["snapshot"])
+        if report["snapshot_verified"] is not None:
+            snapshot += "   verified" if report["snapshot_verified"] else "   NOT verified"
+        registration = _fmt(report["registration_fingerprint"])
+        if report["registration_resolution"] is not None:
+            registration += (
+                f"   ({report['registration_resolution']}"
+                f", {_fmt(report['registration_binding'])})"
+            )
+        if report["registration_agreement"] is not None:
+            registration += f"   {report['registration_agreement']}"
+        bound_at = _fmt(report["bound_at"])
+        if report["bound_by"]:
+            bound_at += f"   by {report['bound_by']}"
+        rows = [
+            ("session_id", _fmt(report["session_id"])),
+            ("trace", trace),
+            ("resolution", _fmt(report["resolution"])),
+            ("binding", _fmt(report["binding"])),
+            ("source_path", _fmt(report["source_path"])),
+            ("fingerprint", _fmt(report["fingerprint"])),
+            ("content_hash", _fmt(report["content_hash"])),
+            ("snapshot", snapshot),
+            ("registration", registration),
+            ("bound_at", bound_at),
+            ("recovered_from", _fmt(report["recovered_from"])),
+            ("status", _fmt(report["status"])),
+        ]
+        for key, value in rows:
+            print(f"{key + ':':<16} {value}")
+    return 0 if report["status"] in _RESOLVE_EXIT_ZERO else 1
+
+
+def _list_snapshots() -> List[Dict[str, object]]:
+    """Every ``profiles/*.json`` under the snapshot directories, with the
+    count of sidecar binding entries referencing each. Pure read."""
+    rows: List[Dict[str, object]] = []
+    for directory in _snapshot_directories():
+        profiles_dir = directory / _resumption.PROFILES_DIR_NAME
+        if not profiles_dir.is_dir():
+            continue
+        references: Counter = Counter()
+        for sidecar in sorted(directory.glob("*.jsonl.index")):
+            bucket = _resumption._read_sidecar(sidecar).get(_resumption._SESSION_BINDING_KEY)
+            if not isinstance(bucket, dict):
+                continue
+            for entry in bucket.values():
+                if isinstance(entry, dict) and isinstance(entry.get("snapshot"), str):
+                    references[entry["snapshot"]] += 1
+        for path in sorted(profiles_dir.glob("*.json")):
+            try:
+                data = path.read_bytes()
+            except OSError:
+                data = None
+            content_hash = path.stem
+            verified = data is not None and _resumption.content_hash_of(data) == content_hash
+            rows.append(
+                {
+                    "directory": str(directory),
+                    "path": str(path),
+                    "content_hash": content_hash,
+                    "fingerprint": content_hash[:12],
+                    "bytes": len(data) if data is not None else None,
+                    "verified": verified,
+                    "sessions": references[_resumption.snapshot_relative_path(content_hash)],
+                }
+            )
+    return rows
+
+
+def run_profile_snapshots(args: argparse.Namespace) -> int:
+    """``sentience profile snapshots [--json]``: list snapshot files.
+
+    READ-ONLY: no pruning, repair or deletion. Exit 0 always; a corrupt
+    file shows as ``verified: NO`` in the listing.
+    """
+    rows = _list_snapshots()
+    if bool(getattr(args, "json", False)):
+        print(json.dumps(rows, indent=2, sort_keys=False))
+        return 0
+    if not rows:
+        print("(no snapshots)")
+        return 0
+    header = f"{'content_hash':<64}  {'fingerprint':<12}  {'bytes':>7}  {'verified':<8}  sessions"
+    print(header)
+    current_dir = None
+    for row in rows:
+        if row["directory"] != current_dir:
+            current_dir = row["directory"]
+            print(f"# {current_dir}")
+        size = "?" if row["bytes"] is None else str(row["bytes"])
+        print(
+            f"{row['content_hash']:<64}  {row['fingerprint']:<12}  {size:>7}  "
+            f"{_fmt(row['verified']):<8}  {row['sessions']}"
+        )
+    return 0
+
+
 def _peek_header_hash(path: Path) -> Optional[str]:
     """Return the SHA256 hash from a profile file's header, or None.
 
@@ -3144,6 +3477,49 @@ def main() -> int:
         help="Create a starter profile at ~/.sentience/profile.yaml.",
     )
     pv_init.set_defaults(func=run_profile_init)
+
+    # v0.3.2 — read-only resolution and snapshot inspection.
+    pv_resolve = profile_subparsers.add_parser(
+        "resolve",
+        help=(
+            "Report which profile governs an agent or a session. "
+            "Read-only: writes no snapshot, binding or trace."
+        ),
+    )
+    resolve_target = pv_resolve.add_mutually_exclusive_group(required=True)
+    resolve_target.add_argument(
+        "--agent-id",
+        dest="agent_id",
+        help="What a NEW session for this agent id would resolve to (exit 0).",
+    )
+    resolve_target.add_argument(
+        "--session-id",
+        dest="session_id",
+        help=(
+            "Inspect an existing Claude Code session's sticky binding and "
+            "snapshot; exit 1 on any fault status."
+        ),
+    )
+    pv_resolve.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit the report as one JSON object.",
+    )
+    pv_resolve.set_defaults(func=run_profile_resolve)
+
+    pv_snapshots = profile_subparsers.add_parser(
+        "snapshots",
+        help=(
+            "List profile snapshot files beside the Claude Code traces "
+            "with verification and referencing-session counts. Read-only."
+        ),
+    )
+    pv_snapshots.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit the listing as a JSON array.",
+    )
+    pv_snapshots.set_defaults(func=run_profile_snapshots)
 
     # ------------------------------------------------------------------
     # `sentience init ...` — one-command runtime wiring.
