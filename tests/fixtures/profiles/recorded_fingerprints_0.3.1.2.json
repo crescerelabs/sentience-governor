@@ -1,0 +1,22 @@
+{
+  "defaults": {
+    "content_hash": "e9364ed6c11c123f24e708f3747d460eaee680ac57ec82799b4b9975408bf803",
+    "fingerprint": "e9364ed6c11c"
+  },
+  "legacy_empty_lists.yaml": {
+    "content_hash": "e9364ed6c11c123f24e708f3747d460eaee680ac57ec82799b4b9975408bf803",
+    "fingerprint": "e9364ed6c11c"
+  },
+  "legacy_minimal.yaml": {
+    "content_hash": "e9364ed6c11c123f24e708f3747d460eaee680ac57ec82799b4b9975408bf803",
+    "fingerprint": "e9364ed6c11c"
+  },
+  "legacy_representative.yaml": {
+    "content_hash": "1d8595c5aa33b6738e55fadb0875f040be33656f79f306b0b2662ea107810fd6",
+    "fingerprint": "1d8595c5aa33"
+  },
+  "legacy_reserved_and_unknown.yaml": {
+    "content_hash": "f4794d2357454d512624e6a9d5cba7c893d57b06817e43222bafbf19c7d27a30",
+    "fingerprint": "f4794d235745"
+  }
+}

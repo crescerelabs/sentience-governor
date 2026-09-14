@@ -1,0 +1,11 @@
+# A representative operator profile written before v0.3.2 existed.
+schema_version: 1
+session_intent:
+  demand_at: first_write
+task_boundary:
+  signals: [dir_change, time_gap]
+  time_gap_seconds: 120
+high_consequence:
+  tools:
+    - "Bash:shell"
+    - "fs\\.write:.*outside_project.*"

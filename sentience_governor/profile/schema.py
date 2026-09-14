@@ -168,7 +168,57 @@ DEFAULT_TASK_BOUNDARY = {
 
 DEFAULT_HIGH_CONSEQUENCE = {
     "tools": [],                    # empty = no high-consequence patterns
-    "on_match": ON_MATCH_FLAG,      # value is moot when tools is empty
+    "operations": [],               # v0.3.2: empty = no structured operation rules
+    "on_match": ON_MATCH_FLAG,      # value is moot when tools and operations are empty
+}
+
+
+# ---------------------------------------------------------------------------
+# v0.3.2 — high_consequence.operations (structured per-effect rules)
+# ---------------------------------------------------------------------------
+
+# A rule is a mapping over these keys. Every predicate the rule specifies
+# must be satisfied by ONE classified effect for the rule to match (the
+# evaluator that consumes these lands in a later checkpoint; this module
+# owns only the shape, the vocabulary and the identity contract).
+OPERATION_RULE_KEYS = frozenset(["domain", "action", "destructive"])
+
+# Where a classified effect operates.
+OPERATION_DOMAINS = frozenset([
+    "filesystem",
+    "version_control",
+    "packages",
+    "network",
+    "cloud_infrastructure",
+    "process",
+    "unknown",
+])
+
+# What a classified effect does.
+OPERATION_ACTIONS = frozenset([
+    "read",
+    "create",
+    "modify",
+    "delete",
+    "execute",
+    "unknown",
+])
+
+# Predicates whose list values are SETS: order and repetition carry no
+# meaning, so the canonical form sorts and deduplicates them.
+SET_VALUED_RULE_PREDICATES = frozenset(["domain", "action"])
+
+# Registry of optional-additive profile fields: (section, key) -> the value
+# that means "absent". A registered key contributes to the content hash
+# only when present with a non-absent value, so an existing profile keeps
+# its historical fingerprint when a later runtime adds the key to the
+# defaults. Every future additive optional capability is added here with
+# its absent-equivalent; nothing else about hashing changes. The three
+# original empty-default fields (task_boundary.signals,
+# high_consequence.tools, session_intent.prompt_template) are deliberately
+# NOT registered: they have always been hashed.
+OPTIONAL_ADDITIVE_FIELDS = {
+    (SECTION_HIGH_CONSEQUENCE, "operations"): [],
 }
 
 
@@ -189,5 +239,6 @@ def default_profile_data() -> dict:
         SECTION_HIGH_CONSEQUENCE: {
             **DEFAULT_HIGH_CONSEQUENCE,
             "tools": list(DEFAULT_HIGH_CONSEQUENCE["tools"]),
+            "operations": list(DEFAULT_HIGH_CONSEQUENCE["operations"]),
         },
     }
