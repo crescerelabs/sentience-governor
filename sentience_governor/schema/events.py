@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any, List, Optional, Union
+from typing import Any, List, Literal, Optional, Union
 
 from pydantic import BaseModel, Field, model_serializer
 
@@ -210,6 +210,69 @@ class IntentDeclaredPayload(BaseModel):
     session_scope_hint: List[str] = Field(default_factory=list)
 
 
+# ---------------------------------------------------------------------------
+# v0.3.2 — semantic shell classification (multi-effect, per segment)
+#
+# A Bash call is represented as ordered segments, each carrying zero, one or
+# many ClassifiedEffect triples. Every triple corresponds to one effect the
+# classifier asserted for one segment; nothing is aggregated across effects
+# or segments (there is deliberately no top-level domain/action). Vocabularies
+# are closed. `destructive` is tri-state: True only with strong syntactic
+# evidence of discarding, False when the rules establish non-destructive,
+# None when it depends on unseen state. The object is optional and
+# None-omitted on ScopeAssertedPayload; `operation_type` is unchanged.
+# ---------------------------------------------------------------------------
+
+OPERATION_DOMAINS = (
+    "filesystem",
+    "version_control",
+    "packages",
+    "network",
+    "cloud_infrastructure",
+    "process",
+    "unknown",
+)
+OPERATION_ACTIONS = ("read", "create", "modify", "delete", "execute", "unknown")
+
+OperationDomain = Literal[
+    "filesystem",
+    "version_control",
+    "packages",
+    "network",
+    "cloud_infrastructure",
+    "process",
+    "unknown",
+]
+OperationAction = Literal["read", "create", "modify", "delete", "execute", "unknown"]
+
+
+class ClassifiedEffect(BaseModel):
+    domain: OperationDomain
+    action: OperationAction
+    destructive: Optional[bool] = None
+
+
+class ClassifiedSegment(BaseModel):
+    executable: str
+    subcommand: Optional[str] = None
+    effects: List[ClassifiedEffect] = Field(default_factory=list)
+
+    @model_serializer(mode="wrap")
+    def _omit_none_subcommand(self, default_handler):
+        raw = default_handler(self)
+        if raw.get("subcommand") is None:
+            raw.pop("subcommand", None)
+        return raw
+
+
+class OperationClassification(BaseModel):
+    classifier: str
+    classifier_version: int
+    complete: bool
+    destructive: Optional[bool] = None
+    segments: List[ClassifiedSegment] = Field(default_factory=list)
+
+
 class ScopeAssertedPayload(BaseModel):
     tool_id: str
     asserted_permissions: List[str] = Field(default_factory=list)
@@ -223,11 +286,19 @@ class ScopeAssertedPayload(BaseModel):
     # it None and the field never appears, so existing traces are unchanged.
     tool_use_id: Optional[str] = None
 
+    # v0.3.2 — semantic classification of a shell command (Bash calls only,
+    # wired by the Claude Code hook in a later checkpoint). Optional and
+    # None-omitted: absent means this path does not classify; present with
+    # unknown effects means the classifier ran and could not. The legacy
+    # `operation_type` and `target_system` fields are unchanged.
+    operation_classification: Optional[OperationClassification] = None
+
     @model_serializer(mode="wrap")
     def _omit_none_tool_use_id(self, default_handler):
         raw = default_handler(self)
-        if raw.get("tool_use_id") is None:
-            raw.pop("tool_use_id", None)
+        for field in ("tool_use_id", "operation_classification"):
+            if raw.get(field) is None:
+                raw.pop(field, None)
         return raw
 
 
