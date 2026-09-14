@@ -54,6 +54,11 @@ def profile_view_payload() -> Dict[str, Any]:
     Returns the declared profile plus provenance so a consumer reads the
     *declared* posture rather than inferring one (plan §3.3 / §3.4). When no
     profile file exists, returns the defaults with ``from_file: false``.
+
+    This is the machine DEFAULT profile (``~/.sentience/profile.yaml``). Since
+    v0.3.2 a given agent may resolve to a different profile through
+    ``~/.sentience/resolution.yaml``; this view does not apply that
+    resolution.
     """
     profile = GovernanceProfile.from_default_path_or_none()
     from_file = profile is not None

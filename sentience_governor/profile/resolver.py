@@ -51,11 +51,8 @@ from typing import Any, List, Optional, Tuple
 
 import yaml
 
-from sentience_governor.profile.loader import (
-    DEFAULT_PROFILE_PATH,
-    DEFAULT_RESOLUTION_PATH,
-    GovernanceProfile,
-)
+from sentience_governor.profile import loader as _loader
+from sentience_governor.profile.loader import GovernanceProfile
 
 logger = logging.getLogger(__name__)
 
@@ -101,11 +98,19 @@ def resolve_profile(
     ``resolution_path`` and ``default_path`` default to the standard
     locations and are parameters so the resolver can be tested and so the
     read-only CLI can run it against any pair of files.
+
+    When ``default_path`` is not given, the default step delegates to
+    ``GovernanceProfile.from_default_path_or_none()`` itself, so the
+    existing entry point's behaviour (including its ``DEFAULT_PROFILE_PATH``
+    lookup and its raising on a malformed file) is reused rather than
+    re-implemented. The two module-level paths are read at call time from
+    the loader module, never bound at import.
     """
     resolution_path = (
-        DEFAULT_RESOLUTION_PATH if resolution_path is None else Path(resolution_path)
+        _loader.DEFAULT_RESOLUTION_PATH
+        if resolution_path is None
+        else Path(resolution_path)
     )
-    default_path = DEFAULT_PROFILE_PATH if default_path is None else Path(default_path)
     warnings: List[str] = []
 
     # ---- Step 1: binding -------------------------------------------------
@@ -141,11 +146,17 @@ def resolve_profile(
         )
 
     # ---- Step 2: default (existing semantics preserved, may raise) -------
-    source = SOURCE_DEGRADED if matched_pattern is not None else SOURCE_DEFAULT
-    if default_path.is_file():
+    if default_path is None:
+        default_profile = GovernanceProfile.from_default_path_or_none()
+    else:
+        default_path = Path(default_path)
+        default_profile = (
+            GovernanceProfile.from_file(default_path) if default_path.is_file() else None
+        )
+    if default_profile is not None:
         return ResolvedProfile(
-            profile=GovernanceProfile.from_file(default_path),
-            source=source,
+            profile=default_profile,
+            source=SOURCE_DEGRADED if matched_pattern is not None else SOURCE_DEFAULT,
             binding=matched_pattern,
             warnings=tuple(warnings),
         )
