@@ -11,6 +11,20 @@ name: integration-pydantic-ai
 # working tree and the integration on top of it, then runs only the
 # integration's own tests. It never runs the core suite, and `test.yml`
 # never runs these.
+#
+# Applicability guard. The integration publishes a deliberate, narrow
+# dependency range on core. When the core version in this tree lies
+# outside that range, installing the pair is not a valid test: pip would
+# satisfy the integration's pin by pulling a published core over the
+# editable one, and the suite would run in a mixed environment. So each
+# leg first derives applicability from the two pyproject files
+# (scripts/integration_applicability.py). Inside the range every install
+# and test step runs exactly as before and failures fail CI; outside it
+# the leg reports NOT APPLICABLE with both versions and the declared
+# boundary and finishes without installing or testing. Malformed metadata
+# fails the leg rather than skipping it. Nothing is hard-coded to a
+# release: the integration's own next release, which widens its range
+# after verifying the new core, makes the matrix applicable again.
 on:
   push:
     branches: [main]
@@ -48,9 +62,25 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Install core and the integration
+      - name: Determine applicability of this core to the integration's declared range
+        id: applicability
         run: |
           python -m pip install --upgrade pip
+          python -m pip install "packaging>=22" "tomli>=2.0; python_version < '3.11'"
+          python scripts/integration_applicability.py
+
+      - name: Not applicable to this declared package pair
+        if: steps.applicability.outputs.applicable != 'true'
+        run: |
+          echo "::notice title=integration matrix not applicable::${{ steps.applicability.outputs.message }}"
+          echo "${{ steps.applicability.outputs.message }}"
+          echo "The integration's compatibility proof for a core outside its declared range is the"
+          echo "local widened-pin validation recorded with the release; its own matrix runs again once"
+          echo "it declares a range that admits this core."
+
+      - name: Install core and the integration
+        if: steps.applicability.outputs.applicable == 'true'
+        run: |
           # Core first, from this tree rather than from PyPI: the
           # integration declares a dependency on published core, and
           # installing it here would test the released core instead of
@@ -59,15 +89,16 @@ jobs:
           python -m pip install -e "./integrations/pydantic-ai-governor[dev]"
 
       - name: Pin pydantic-ai-slim to the floor of the declared range
-        if: matrix.pydantic-ai == 'floor'
+        if: steps.applicability.outputs.applicable == 'true' && matrix.pydantic-ai == 'floor'
         run: python -m pip install "pydantic-ai-slim==2.37.0"
 
       - name: Resolve pydantic-ai-slim to the ceiling of the declared range
-        if: matrix.pydantic-ai == 'ceiling'
+        if: steps.applicability.outputs.applicable == 'true' && matrix.pydantic-ai == 'ceiling'
         run: |
           python -m pip install --upgrade "pydantic-ai-slim>=2.37.0,<2.38"
 
       - name: Report the resolved environment
+        if: steps.applicability.outputs.applicable == 'true'
         run: |
           python -c "import sys; print('python', sys.version)"
           python -m pip show pydantic-ai-slim sentience-governor \
@@ -76,4 +107,5 @@ jobs:
       # Explicit path, and only this path. Running from the repository
       # root would pick up the root config and discover the core suite.
       - name: Run the integration suite
+        if: steps.applicability.outputs.applicable == 'true'
         run: python -m pytest integrations/pydantic-ai-governor/tests -v
