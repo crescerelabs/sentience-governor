@@ -313,9 +313,9 @@ sentience demo closed-loop         # a clean session (100% declared) with profil
 
 Useful for seeing what a populated analysis looks like before you've wired token attribution on your own sessions.
 
-### `sentience profile {init|view|validate|export|import|edit}`
+### `sentience profile {init|view|validate|export|import|edit|resolve|snapshots}`
 
-Manage the governance profile at `~/.sentience/profile.yaml`. Six verbs. Available since v0.2.5.
+Manage the governance profile at `~/.sentience/profile.yaml`. Six verbs since v0.2.5, plus two read-only diagnostics since v0.3.2.
 
 ```bash
 sentience profile init       # create a starter profile (inline-commented since v0.2.5.5)
@@ -324,6 +324,9 @@ sentience profile validate   # schema check (read-only — never mutates the fil
 sentience profile edit       # open ~/.sentience/profile.yaml in an editor
 sentience profile export /path/to/dest.yaml   # write the active profile to a path
 sentience profile import /path/to/source.yaml # validate + install at ~/.sentience/profile.yaml
+sentience profile resolve --agent-id deploy-bot   # what a NEW session for this agent would resolve to (read-only)
+sentience profile resolve --session-id <session>  # verify an existing Claude Code session's sticky binding (read-only)
+sentience profile snapshots                       # list the profile snapshots beside the traces (read-only)
 ```
 
 `profile edit` resolves an editor through `$VISUAL` → `$EDITOR` → `nano`/`vim`/`vi` → (macOS) TextEdit, so it works even when `$EDITOR` is unset. After you edit a generated profile, `profile validate` reports a clear informational note that the header hash is stale (the runtime uses the recomputed hash) — not an error.
@@ -338,12 +341,18 @@ Verbs:
 | `export <path>` | Write the active profile to an explicit path with a fresh header (content hash + timestamp recomputed). |
 | `import <path>` | Read a profile from an explicit path, validate it, install at `~/.sentience/profile.yaml`. Refuses to install if validation fails. |
 | `edit` | Open `~/.sentience/profile.yaml` in `$EDITOR`. Errors if no file exists (run `init` first) or if `$EDITOR` is unset. |
+| `resolve --agent-id <id>` | **Read-only** (v0.3.2). Prints the resolution a new session for that agent would get (`bound`, `degraded`, `default`, `none`), the matched binding from `~/.sentience/resolution.yaml`, the source path, the 12-char fingerprint, the full content hash and any warnings. Exit 0 always. `--json` emits one object. |
+| `resolve --session-id <sid>` | **Read-only** (v0.3.2). Verifies an existing Claude Code session's binding and snapshot (full hash first, then fingerprint, then agreement with the session's `AGENT_REGISTERED`) and reports `OK`, `NO_BINDING`, `SNAPSHOT_MISSING`, `SNAPSHOT_CORRUPTED`, `BINDING_INVALID`, `DISAGREES_WITH_REGISTRATION` or `NO_TRACE`. Exit 0 for `OK` and `NO_BINDING`, 1 otherwise. `--json` emits one object. |
+| `snapshots` | **Read-only** (v0.3.2). Lists every content-addressed profile snapshot beside the Claude Code traces: full content hash, fingerprint, bytes, whether the bytes still verify, and how many session bindings reference it. Exit 0 always; never repairs, prunes or writes. `--json` emits an array. |
 
-**The profile shapes three things** that the runtime applies to every governed session (Claude Code hook, MCP wrapper, LangChain handler):
+**Which profile applies** is resolved once per session from `~/.sentience/resolution.yaml` (first matching `agent_id` pattern), else the machine default, else none; a matched binding that fails to load is `degraded` and never falls through to a later binding. See [Governance profiles](./profile.md#which-profile-governs-a-session-032).
+
+**The profile shapes four things** that the runtime applies to every governed session (Claude Code hook, MCP wrapper, LangChain handler):
 
 1. **When undeclared intent is surfaced** — `session_intent.demand_at` is one of `session_start`, `first_write`, or `never`.
 2. **When the agent has crossed a task boundary** — `task_boundary.signals` is any subset of `dir_change`, `file_type_shift`, `read_to_write_transition`, `time_gap`. Fires `TASK_BOUNDARY_CROSSED` on the next `SCOPE_ASSERTED`.
 3. **Which tools should be treated as high-consequence** — `high_consequence.tools` is a list of regex patterns matched against `<tool_id>:<target_system>`. Fires `HIGH_CONSEQUENCE_DETECTED` on match.
+4. **Which shell operations should be treated as high-consequence** (v0.3.2): `high_consequence.operations` is a list of rules over the classified effects of a Claude Code Bash call (`domain`, `action`, `destructive`). A rule fires `HIGH_CONSEQUENCE_DETECTED` only when one individual effect satisfies every predicate; effects are never combined. See [Governance profiles](./profile.md#operations-rules-032).
 
 All signals are observational. Nothing is blocked, scoped, or modified. See the [user guide §11](https://github.com/crescerelabs/sentience-governor/blob/main/docs/guide/sentience_governor.md#11-governance-profiles) for the full schema and walkthrough, and `examples/showcase/v025-closed-loop/` for a complete runnable example.
 

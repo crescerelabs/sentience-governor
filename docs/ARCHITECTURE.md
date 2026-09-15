@@ -131,6 +131,14 @@ A list of regex patterns matched against `<tool_id>:<target_system>`. Matches at
 
 Regex compilation is cached per session. Matching is O(n) over the operator's pattern list, evaluated once per `TOOL_CALL_ATTEMPTED`. The operator authors the patterns; Sentience does not ship opinions about what counts as high-consequence (with the exception of the default policy set, see below).
 
+### `high_consequence.operations` (0.3.2)
+
+A list of rules over the semantic classification of Claude Code Bash calls. Each rule has up to three predicates, `domain` (value or list), `action` (value or list) and `destructive` (`true` / `false`). **A rule matches only when one individual classified effect satisfies every predicate**; a `null` destructive value satisfies neither, and predicates are never combined across effects, so `{domain: cloud_infrastructure, destructive: true}` cannot match `rm -rf /tmp && aws ec2 describe-instances`, whose destructive effect is on the filesystem. A match attaches the same `HIGH_CONSEQUENCE_DETECTED` as the `tools` patterns, once per event. Malformed rules warn at validation and are skipped at runtime.
+
+### `~/.sentience/resolution.yaml` (0.3.2)
+
+An optional second file that binds agents to profiles: `bindings` are `(agent_id pattern, profile path)` pairs scanned in file order; the first shell-style glob that matches the session's `agent_id` is authoritative. A matched binding whose file cannot be loaded is `degraded` and falls to the machine default (or to none) without consulting a later binding. With no match, or no file, the machine default `~/.sentience/profile.yaml` applies as before.
+
 ### Reserved sections
 
 Three sections are reserved in the schema but not implemented in v0.2.5:
@@ -191,11 +199,14 @@ Flags are additive. Multiple flags can be attached to the same event. The analyz
 
 ## Profile Fingerprint
 
-`profile_fingerprint` is a 12-character SHA-256 truncation computed deterministically from the profile content. Three properties:
+`profile_fingerprint` is the first 12 hex characters of the SHA-256 of one canonical representation of the merged profile. Properties:
 
 - **Whitespace-normalized.** Trailing newlines, YAML formatting differences, and comment additions do not change the fingerprint.
 - **Key-ordered.** Sections and keys are sorted to a canonical order before hashing, so equivalent YAML produces equivalent fingerprints regardless of how the operator wrote them.
 - **Content-only.** Comments are stripped before hashing; the fingerprint reflects only what the wrapper actually evaluates against.
+- **Stable across additive schema growth (0.3.2).** Optional additive fields at their absent-equivalent value (`high_consequence.operations: []`) are omitted from the canonical form, so a profile written before the field existed keeps its historical fingerprint and `operations` absent equals `operations: []`.
+- **Operation rules are a set (0.3.2).** Rules are canonicalized to an unordered, deduplicated set and list-valued `domain` / `action` predicates to sorted, deduplicated sets, so reordering or duplicating changes nothing while adding, removing or changing a rule does. The existing ordered fields (`task_boundary.signals`, `high_consequence.tools`) keep their historical ordering semantics.
+- **Two identities from one representation.** The full 64-hex hash (`content_hash`) names the Claude Code snapshot files and is the integrity check; the 12-character prefix is the public evidence identifier. Envelopes carry only the prefix; the full hash never appears in a trace event.
 
 The fingerprint is attached to every event in a governed session. Same profile content always produces the same fingerprint. Traces are correlatable back to the exact profile they were produced against, even across machines.
 
@@ -209,13 +220,13 @@ The same profile, the same event schema, and the same advisory flag vocabulary a
 
 ### Claude Code hook
 
-The hook runs on every Claude Code session start. It reads `~/.sentience/profile.yaml`, validates the schema, computes the fingerprint, and attaches the resolved `GovernanceProfile` object to the session context. Every subsequent `TOOL_CALL_ATTEMPTED` event the hook emits has profile-derived flags pre-attached by the EventBuilder before the sink writer sees it.
+The hook runs a fresh process on every tool call. The first process for a session resolves the profile (below), materializes its canonical bytes into a content-addressed snapshot beside the trace (`<trace dir>/profiles/<sha256>.json`, named by and verified against the full hash, never rewritten once valid), records a per-session binding in the trace's sidecar, and then registers the session. Every later process rebuilds the identical `GovernanceProfile` from the snapshot (full hash first, fingerprint second, agreement with the session's own `AGENT_REGISTERED` third) instead of re-reading the configuration, so editing a profile or the resolution file mid-session changes nothing for that session. Lost state recovers fail-open: a fresh resolution that agrees with the registration is re-materialized silently; one that disagrees continues on the fresh profile with one warning and a `reresolve` marker that later processes honour as sticky. Every subsequent `SCOPE_ASSERTED` event the hook emits has profile-derived flags pre-attached by the EventBuilder before the sink writer sees it, and every Bash call carries its semantic classification (see "Semantic shell classification" below).
 
 Installation: `sentience init claude-code` writes the hook configuration to the machine-local `.claude/settings.local.json` (0.3.0.3+; requires Claude Code v2.1.211+). The hook is opt-in per-project. The configuration is a machine-specific absolute path and is kept current by convergence: any `sentience` command run in the project updates a stale binding after an upgrade or reinstall. Uninstalling the package does not remove the configuration — the entries remain (and fail open, capturing nothing) until removed from `settings.local.json` or repaired by a reinstall.
 
 ### MCP wrapper
 
-`sentience_governor.wrapper.mcp.wrap_mcp_client(client)` returns a wrapped MCP client. The wrapper resolves the profile on construction and attaches it to the client's middleware chain. Tool calls routed through the wrapped client run the same EventBuilder pipeline. The resolved profile travels with the client instance, not the call.
+`sentience_governor.wrapper.mcp.wrap_mcp_client(client)` returns a wrapped MCP client. The wrapper resolves the profile for its `agent_id` once when the session starts (one process per session, so sticky by construction; no sidecar, no snapshot) and attaches it to the client's middleware chain. MCP tool calls are not semantically classified; `high_consequence.tools` patterns apply, `operations` rules do not. Tool calls routed through the wrapped client run the same EventBuilder pipeline. The resolved profile travels with the client instance, not the call.
 
 Compatible with any MCP-spec-compliant client. Wraps the call surface; does not modify the protocol.
 
@@ -223,21 +234,31 @@ Compatible with any MCP-spec-compliant client. Wraps the call surface; does not 
 
 Two integration points:
 
-- `SentienceCallbackHandler` — attaches to the LangChain callback graph. Resolves the profile on instantiation. Hooks `on_tool_start` and `on_tool_end`.
+- `SentienceCallbackHandler` — attaches to the LangChain callback graph. Resolves the profile for its `agent_id` once per root run (sticky by construction). Hooks `on_tool_start` and `on_tool_end`. LangChain tool calls are not semantically classified.
 - `SentienceMiddleware` — for newer LangChain agent patterns that use middleware composition rather than callbacks. Same behavior, different attachment surface.
 
 Both work without modifying the agent's control flow. The handler observes; it does not gate.
 
 ### Resolution path consistency
 
-All three surfaces resolve the profile the same way:
+All three surfaces resolve the profile the same way, once per session, keyed on `agent_id`:
 
-1. Read `~/.sentience/profile.yaml`.
-2. Validate against `schema_version: 1`.
-3. Compute the fingerprint.
-4. Attach to the session context.
+1. If `~/.sentience/resolution.yaml` exists, the first binding whose pattern matches the `agent_id` is authoritative (`bound`). If its file fails to load, the resolution is `degraded` and falls to step 2 without consulting a later binding.
+2. Otherwise the machine default `~/.sentience/profile.yaml`, if it exists (`default`).
+3. Otherwise no profile (`none`).
+4. Validate against `schema_version: 1`, compute the fingerprint, attach to the session context; record `profile_resolution` and `profile_binding` on `AGENT_REGISTERED` for `bound` and `degraded` (omitted for `default` and `none`, so those registrations are unchanged from earlier releases).
 
-No environment variables. No constructor flags. The profile lives where the operator put it, and every wrapper surface knows where to look.
+No environment variables. No constructor flags: there is deliberately no `profile=` or `profile_path=` argument, so the resolution chain is the only chain. The profile lives where the operator put it, and every wrapper surface knows where to look. `sentience profile resolve --agent-id` reports the answer for any agent without writing anything.
+
+`pydantic-ai-governor` 0.1.0 pins core below 0.3.2 and binds no profile; its own 0.1.1 release, planned to follow core 0.3.2, adopts the same resolution at session open.
+
+## Semantic shell classification (0.3.2)
+
+A Claude Code `Bash` call is read by a bounded, deterministic rule classifier (`wrapper/shell_classification.py`) before evaluation: a quote-aware scanner splits the command into segments (`&&`, `||`, `;`, `|`, newlines), strips leading assignments and transparent wrappers, and maps each segment's executable and subcommand through per-family tables (version control, filesystem, packages, network tools, cloud and infrastructure, process). The result is `operation_classification` on the `SCOPE_ASSERTED` payload: ordered segments, each with zero, one or many effects `(domain, action, destructive)`, plus `complete` and a top-level `destructive`. There is no aggregate domain or action: every triple corresponds to one effect the rules established for one segment, and rules match one effect at a time.
+
+Design properties: domains describe material governance effects, not transport (a cloud control-plane call is `cloud_infrastructure`, never `network`); actions are conservative about what the syntax makes possible; `destructive` is three-state (`true` only on strong syntactic evidence of discarding, `false` when the rules establish non-destructive, `null` when state or an unseen plan decides); redirections are filesystem effects on their segment, descriptor duplication is not, and the literal `/dev/null` output target is a sink with no effect; unsupported constructs (`$(…)`, backticks, subshells, brace groups, process substitution) are detected but never interpreted: outer effects are kept, one explicit `unknown` effect is added and `complete` is `false`. The classifier never executes anything, reads no external state, calls no model, and never raises.
+
+The legacy `operation_type` is unchanged (`EXECUTE` for Bash) and still drives POL-001, `first_write`, task boundaries and memory-write detection. `target_system` is derived from the classification: `shell/<domain>` when the classification is complete and exactly one domain appears across every effect, otherwise `shell`; the task-boundary namespace guard treats every `shell/…` target as the one `shell` namespace so a change of semantic subtype is never a directory or file-type shift. MCP, LangChain and Pydantic AI tool calls are not classified in 0.3.2.
 
 ---
 

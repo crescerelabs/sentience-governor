@@ -5,6 +5,125 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.2] — 2026-09-15
+
+**Which policy governs this session, what the agent is actually doing, and
+whether that action triggers the governing policy.** Until now every agent on
+a machine ran under the one profile at `~/.sentience/profile.yaml`, a Claude
+Code session could silently change policy when that file was edited mid-run,
+and every `Bash` call looked the same to the profile: `EXECUTE` on `shell`,
+whether it was `git status` or `aws ec2 terminate-instances`. All three are
+answerable from the trace now.
+
+### Added
+- **Per-session policy resolution.** An optional `~/.sentience/resolution.yaml`
+  binds agents to profiles: the first `agent_id` pattern that matches (file
+  order, shell-style globs) is authoritative; with no match the machine
+  default applies; with neither the session runs without a profile. A matched
+  binding whose file cannot be loaded is `degraded` and falls to the default
+  without consulting a later binding. Resolution happens once per session on
+  every runtime surface (Claude Code hook, MCP wrapper, LangChain handler) and
+  is keyed on `agent_id`; there is deliberately no `profile=` or
+  `profile_path=` argument. `AGENT_REGISTERED` records `profile_resolution`
+  (`bound` or `degraded`) and `profile_binding` (the matched pattern);
+  sessions on the default or on no profile omit both.
+- **Resolution diagnostics.** `sentience profile resolve --agent-id <id>`
+  reports what a new session for that agent would resolve to;
+  `sentience profile resolve --session-id <sid>` verifies an existing Claude
+  Code session's binding and snapshot and reports `OK`, `NO_BINDING`,
+  `SNAPSHOT_MISSING`, `SNAPSHOT_CORRUPTED`, `BINDING_INVALID`,
+  `DISAGREES_WITH_REGISTRATION` or `NO_TRACE` (exit 1 on any fault);
+  `sentience profile snapshots` lists the snapshot files with their hashes,
+  fingerprints, verification and referencing-session counts. All three are
+  read-only and take `--json`.
+- **Sticky Claude Code profile binding and snapshots.** The hook runs a new
+  process per tool call, so the first process for a session now materializes
+  the resolved profile into a content-addressed snapshot beside the trace
+  (`profiles/<sha256>.json`, verified before use, never rewritten once valid)
+  and records a per-session binding in the trace's sidecar; every later
+  process rebuilds the identical profile from the snapshot. Editing a profile
+  or the resolution file mid-session no longer changes that session. Lost
+  state recovers fail-open: a fresh resolution that agrees with the session's
+  registration is re-materialized silently; one that disagrees continues on
+  the fresh profile with one warning and a visible `reresolve` marker.
+- **Semantic Bash operation classification.** Every Claude Code `Bash`
+  `SCOPE_ASSERTED` carries `operation_classification`: the command read by a
+  bounded, deterministic rule classifier into ordered segments, each with
+  zero, one or many effects of `domain` (`filesystem`, `version_control`,
+  `packages`, `network`, `cloud_infrastructure`, `process`, `unknown`),
+  `action` (`read`, `create`, `modify`, `delete`, `execute`, `unknown`) and
+  three-state `destructive`, plus `complete`. `curl -o x URL` is
+  `network/read/false` and `filesystem/modify/null`; `git clone URL` is
+  `network/read/false` and `version_control/create/false`;
+  `rm -rf /tmp && aws ec2 describe-instances` is `filesystem/delete/true` and
+  `cloud_infrastructure/read/false`. Unknown executables, opaque forms and
+  anything inside `$(…)`, backticks, subshells, brace groups or process
+  substitution are explicit `unknown` with `complete: false`, never guessed.
+  Redirections are filesystem effects on their segment; `2>&1`, heredocs and
+  herestrings are not; the literal `/dev/null` output target is a sink. The
+  classifier never executes anything, reads no external state, calls no
+  model, and never raises. Bash `target_system` becomes `shell/<domain>` when
+  the classification is complete and single-domain, otherwise `shell`.
+- **Structured `high_consequence.operations`.** Profile rules over classified
+  effects, with `domain` and `action` as values or lists and `destructive` as
+  `true` or `false`. A rule matches only when one individual effect satisfies
+  every predicate: `{domain: network, action: modify}` does not match
+  `curl -o`, `{domain: cloud_infrastructure, destructive: true}` does not
+  match `rm -rf /tmp && aws ec2 describe-instances`, and
+  `{domain: network, destructive: true}` does not match `git push --force`. A
+  match attaches the existing `HIGH_CONSEQUENCE_DETECTED`, once per event and
+  shared with the `tools` patterns; `on_match` stays `flag`. Malformed rules
+  warn at validation and are skipped at runtime.
+
+### Notes
+- **Additive where intended.** Event payloads gain only optional,
+  None-omitted fields (`operation_classification`, `profile_resolution`,
+  `profile_binding`); profile schema version stays 1; no constructor
+  signature changes. With no resolution file, registrations and envelopes are
+  identical to 0.3.1.2 for the same inputs.
+- **`operation_type` is unchanged.** Bash remains `EXECUTE` on that legacy
+  field, which still drives POL-001, `first_write`, task boundaries,
+  memory-write detection and the analyzers. `operation_classification` is the
+  additive, authoritative semantic description; it does not replace the legacy
+  field.
+- **`target_system` compatibility.** `high_consequence.tools` patterns and
+  scope hints keep their two-part `<tool_id>:<target_system>` composite.
+  `Bash:shell` continues to match every Bash call; an end-anchored
+  `Bash:shell$` matches only plain `shell`. The task-boundary namespace guard
+  treats every `shell/…` target as the one `shell` namespace, so a change of
+  semantic subtype never manufactures a `dir_change` or `file_type_shift`.
+- **The default remains non-blocking.** Classification and operations rules
+  flag; nothing is stopped, prompted or modified.
+- **MCP and LangChain do not gain Bash semantic classification.** They
+  resolve profiles per session like the hook, but their tool calls carry no
+  `operation_classification`, so `operations` rules never fire for them;
+  `tools` patterns do.
+- **Pydantic AI semantic behaviour is unchanged in core 0.3.2.**
+  `pydantic-ai-governor` 0.1.0 pins core `<0.3.2` and binds no resolved
+  profile; its `UNKNOWN → READ` compatibility fallback on the legacy field is
+  untouched. `pydantic-ai-governor` 0.1.1 follows as a separate companion
+  release that adopts per-agent resolution; it is not part of this release.
+- **`destructive` is tri-state.** `true` requires strong deterministic syntax
+  evidence of discarding or state-replacing behaviour; `false` means the
+  effect is deterministically non-destructive; `null` means syntax alone
+  cannot establish it (`cp a b`, `curl -o`, `terraform apply`,
+  `kubectl apply`, every `execute` and `unknown` effect). Ambiguity is never
+  collapsed. Domains describe material governance effects, not implementation
+  transport: cloud control-plane calls are not `network`.
+- **Fingerprint stability.** Profiles written before
+  `high_consequence.operations` existed keep their fingerprint; `operations`
+  absent and `operations: []` are identical; operation rules are an unordered
+  set for identity (reordering or duplicating a rule changes nothing; adding,
+  removing or changing one does); list-valued `domain` / `action` predicates
+  are sets; the existing ordered fields (`signals`, `tools`) keep their
+  historical ordering semantics. The 12-character `profile_fingerprint` and
+  the full content hash derive from one canonical representation.
+- **Public evidence exposes only the 12-character fingerprint.** The full
+  64-character hash names snapshot files and appears in the sidecar and the
+  diagnostic commands; it never appears in a trace event.
+
+---
+
 ## [0.3.1.2] — 2026-09-01
 
 **Context for the review, over MCP.** The scan summary could say how many

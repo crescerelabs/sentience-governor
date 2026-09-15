@@ -1,18 +1,26 @@
 # MCP integration
 
 `wrap_mcp_client` produces a governed MCP client that emits a
-governance event around every tool call. v0.2.5 adds governance
-profiles: if `~/.sentience/profile.yaml` exists, the wrapper picks
-it up automatically — no signature changes, no new keyword
+governance event around every tool call. Governance profiles are
+picked up automatically: no signature changes, no new keyword
 arguments.
 
 ## How profiles plug in
 
-Inside `_WrappedMCPSession._start()`, the wrapper calls
-`GovernanceProfile.from_default_path_or_none()` and passes the
-result to `SessionManager.session_start(profile=...)`. When the file
-is absent, the session takes the v0.2.4 code path; when it exists,
-the wrapper enforces the profile's signals.
+Inside `_WrappedMCPSession._start()`, the wrapper resolves the profile
+for its `agent_id` once, with `resolve_profile(agent_id=...)`: the first
+matching binding in `~/.sentience/resolution.yaml` if there is one, else
+`~/.sentience/profile.yaml` if it exists, else none (0.3.2; a matched
+binding that fails to load is `degraded` and falls to the default without
+consulting a later binding). The result goes to
+`SessionManager.session_start(profile=...)` and the resolution provenance
+to the `AGENT_REGISTERED` event. One process is one session, so the
+profile is sticky for the session by construction. When nothing resolves,
+the session takes the pre-profile code path.
+
+MCP tool calls are **not** semantically classified in 0.3.2 (that is a
+Claude Code Bash feature): `high_consequence.tools` patterns apply to
+them, `high_consequence.operations` rules do not.
 
 ## Mapping your existing setup
 
@@ -26,7 +34,9 @@ the wrapper enforces the profile's signals.
 
 Every event carries an envelope-level `profile_fingerprint`
 (12 hex chars). The `AGENT_REGISTERED` event additionally carries
-`profile_loaded: true` and `profile_schema_version` in its payload.
+`profile_loaded: true` and `profile_schema_version` in its payload, and,
+when the session resolved through a binding, `profile_resolution`
+(`bound` or `degraded`) and `profile_binding` (the matched pattern).
 The new advisory flags (`TASK_BOUNDARY_CROSSED`,
 `HIGH_CONSEQUENCE_DETECTED`) fire on `SCOPE_ASSERTED` events when
 the profile's signals trigger.

@@ -680,9 +680,13 @@ sentience open <session_id>          # render a specific session by id or prefix
 
 The older `sentience-cli <file>` command is still there and is still the right tool for library traces (MCP wrapper, LangChain) where every event carries unique signal. For Claude Code session traces, `sentience` is what you want.
 
-### Known blind spot — Bash
+### Bash: what the command actually does (0.3.2)
 
-**Absence of `MEMORY_WRITE_ATTEMPT` on a `Bash` event does NOT imply the command is safe.** The Governor records every `Bash` invocation (tool name, scope, command string in `CONTEXT_SNAPSHOT`) but does not attempt to parse shell-command semantics in v0. A `Bash` call that runs `rm -rf`, `curl | sh`, or `psql ... < migration.sql` will appear as a benign `EXECUTE` + unclassified context without firing a memory-write event. Treat `Bash` scope events as "look here first" when reviewing traces.
+Every `Bash` `SCOPE_ASSERTED` carries `operation_classification`: a deterministic, rule-based reading of the command text into segments and effects (`domain`, `action`, `destructive`), with `complete` stating whether every part was recognised. `rm -rf build` is `filesystem/delete/true`; `curl -o x URL` is `network/read/false` plus `filesystem/modify/null`; `./deploy.sh`, `bash -c '…'` and anything inside `$(…)` are explicit `unknown`. The classifier never runs the command, never reads files or the network, and never guesses. The full field contract, the material-effect and three-state destructive rules, and the `/dev/null` sink are in [Governance profiles](../profile.md#operations-rules-032).
+
+**Two contracts on one event.** The legacy `operation_type` is unchanged and stays `EXECUTE` for every Bash call; it continues to serve POL-001, `first_write`, task boundaries and every existing consumer. `operation_classification` is the additive, authoritative semantic description. `target_system` is derived from the classification (`shell/<domain>` when complete and single-domain, else `shell`), so `high_consequence.tools` patterns such as `Bash:shell` keep matching every Bash call while `Bash:shell$` narrows to commands the classifier could not fully read.
+
+**`MEMORY_WRITE_ATTEMPT` still does not fire for Bash.** Persistence detection keys on the legacy `operation_type`, which stays `EXECUTE`. Use `high_consequence.operations` rules (for example `{domain: filesystem, action: delete}` or `{domain: unknown}`) to flag what matters to you, and treat `unknown` classifications as "look here first".
 
 ### Configuration
 
@@ -715,14 +719,13 @@ The hook **never blocks Claude Code tool execution** for any reason. Every error
 - Does not block any tool invocation
 - Does not send data to any network service (traces are local-file only)
 - Does not require an API key or account
-- Does not introspect `Bash` command strings for persistence semantics (see blind spot note above)
+- Does not execute or interpret `Bash` command strings: classification is bounded syntax reading, and anything it cannot recognise is recorded as `unknown`, never guessed
 
 ### Future enhancements
 
 Tracked in the Parking Lot and pulled based on real-world user signal:
 
 - Classification hook on the Claude Code path (today the MCP wrapper supports one; this adapter does not)
-- Heuristic `Bash` command classification behind a feature flag
 - Lifting the session-resumption primitive into `FileSink` so the MCP wrapper inherits the same continuity guarantees (see §15 "Known limitations")
 
 ## 8. Injecting classification metadata via the hook
@@ -1185,7 +1188,9 @@ In v0.2.5 a profile shapes three things, all observability signals
    signals on one event produce a single flag.
 
 3. **Which tools should be treated as high-consequence**
-   (`high_consequence.tools`). A list of regex patterns matched
+   (`high_consequence.tools`), and, since 0.3.2, **which shell operations**
+   (`high_consequence.operations`, rules over what a Bash command does:
+   `domain`, `action`, `destructive`; see §11.10). A list of regex patterns matched
    against the composite `<tool_id>:<target_system>` (so
    `Bash:rm -rf /tmp/scratch` matches `Bash:.*rm.*-rf.*`). A
    match adds `HIGH_CONSEQUENCE_DETECTED` to that event.
@@ -1246,6 +1251,10 @@ high_consequence:
     - "Bash:.*rm.*-rf.*"
     - "Bash:.*git.*push.*--force.*"
     - "fs.write:.*\\.env.*"
+  operations:                    # 0.3.2: rules over classified Bash effects
+    - domain: cloud_infrastructure
+      destructive: true
+    - domain: unknown
 ```
 
 **Defaults when fields are omitted:**
@@ -1257,7 +1266,8 @@ high_consequence:
 | `task_boundary.signals` | `[]` (empty) | No boundary detection; `TASK_BOUNDARY_CROSSED` never fires. |
 | `task_boundary.time_gap_seconds` | `300` | Used only if `time_gap` is in `signals`. |
 | `task_boundary.dir_change_depth` | `2` | Used only if `dir_change` is in `signals`. |
-| `high_consequence.tools` | `[]` (empty) | No tool patterns; `HIGH_CONSEQUENCE_DETECTED` never fires. |
+| `high_consequence.tools` | `[]` (empty) | No tool patterns; `HIGH_CONSEQUENCE_DETECTED` never fires from patterns. |
+| `high_consequence.operations` | `[]` (empty) | No operation rules (0.3.2). Absent and `[]` are identity-equivalent, so existing profiles keep their fingerprint. |
 
 **Reserved sections** (recognized but ignored in v0.2.5; reserved
 for future composition features):
@@ -1280,7 +1290,7 @@ current contents.
 
 ### 11.4 CLI commands
 
-Six verbs under `sentience profile`:
+Eight verbs under `sentience profile` (six since 0.2.5, two read-only diagnostics since 0.3.2):
 
 | Verb | What it does |
 |---|---|
@@ -1290,6 +1300,9 @@ Six verbs under `sentience profile`:
 | `export <path>` | Write the active profile to an explicit path with a fresh header (recomputed content hash + timestamp). Inline field comments are included. |
 | `import <path>` | Read a profile from an explicit path, validate it, and install at `~/.sentience/profile.yaml`. Refuses to install a profile that fails validation. |
 | `edit` | Open `~/.sentience/profile.yaml` in an editor. Resolves `$VISUAL` → `$EDITOR` → `nano`/`vim`/`vi` → (macOS) `open -e`; errors only if no file exists (run `init` first) or no editor can be found. |
+| `resolve --agent-id <id>` | **Read-only.** What a new session for that agent would resolve to: resolution (`bound` / `degraded` / `default` / `none`), matched binding, source path, 12-char fingerprint, full content hash, warnings. Exit 0 always. `--json` available. |
+| `resolve --session-id <sid>` | **Read-only.** Verify an existing Claude Code session's sticky binding and snapshot and report `OK`, `NO_BINDING`, `SNAPSHOT_MISSING`, `SNAPSHOT_CORRUPTED`, `BINDING_INVALID`, `DISAGREES_WITH_REGISTRATION` or `NO_TRACE`. Exit 0 for `OK` and `NO_BINDING`, 1 otherwise. `--json` available. |
+| `snapshots` | **Read-only.** List the content-addressed profile snapshots beside the Claude Code traces: full content hash, fingerprint, bytes, whether the bytes verify, referencing-session count. Exit 0 always; repairs nothing. `--json` available. |
 
 `validate` has two flags worth knowing:
 
@@ -1304,18 +1317,34 @@ canonical content hash. The fingerprint stays constant across the
 session's lifetime; mid-session changes to the profile file do not
 affect any already-active session.
 
-`AGENT_REGISTERED` additionally carries two payload-level fields:
+`AGENT_REGISTERED` additionally carries two payload-level fields, and,
+when the session resolved through `~/.sentience/resolution.yaml` (0.3.2),
+two more naming how:
 
 ```json
 {
   "profile_loaded": true,
-  "profile_schema_version": 1
+  "profile_schema_version": 1,
+  "profile_resolution": "bound",
+  "profile_binding": "claude-code-*"
 }
 ```
 
-When no profile file exists, all three fields are absent from the
-serialized JSON — v0.2.4-shaped traces stay byte-identical under
-v0.2.5.
+`profile_resolution` is `bound` or `degraded` and `profile_binding` is the
+matched pattern; sessions on the machine default or on no profile omit
+both. When no profile file exists, every profile field is absent from the
+serialized JSON, so earlier-shaped traces stay byte-identical.
+
+**Fingerprint contract (0.3.2).** The fingerprint is the first 12 hex
+characters of the canonical content hash. Existing profiles keep their
+fingerprint across the upgrade; `operations` absent and `operations: []`
+are the same profile; operation rules are an unordered set (reordering or
+duplicating a rule changes nothing; adding, removing or changing one
+does); list-valued `domain` / `action` predicates are sets; the existing
+ordered fields (`signals`, `tools`) keep their historical ordering
+semantics. Public evidence carries only the 12-character fingerprint; the
+full 64-character hash is the runtime's storage and integrity identity
+and never appears in a trace event.
 
 The two new advisory flag values:
 
@@ -1442,6 +1471,49 @@ The Claude Code hook (`sentience_governor.wrapper.claude_code_hook`)
 uses the same loader path and is wired identically.
 
 ---
+
+### 11.9 Which profile governs a session (0.3.2)
+
+Resolution happens once per session, keyed on `agent_id`: the first
+matching binding in `~/.sentience/resolution.yaml` (file order,
+shell-style globs), else the machine default `~/.sentience/profile.yaml`,
+else none. A matched binding whose file cannot be loaded is `degraded`:
+the session falls to the default (or to none) and **no later binding is
+consulted**. Resolution is sticky for the life of the session on every
+surface. The Claude Code hook, which runs a new process per tool call,
+keeps it sticky through a content-addressed snapshot beside the trace and
+a per-session binding in the sidecar; if that state is lost it recovers
+fail-open, re-materializing silently when the fresh resolution agrees with
+the session's registration and marking the binding `reresolve` with one
+warning when it does not. `sentience profile resolve` and `sentience
+profile snapshots` (§11.4) show what happened without writing anything.
+`pydantic-ai-governor` 0.1.0 does not resolve profiles; that arrives in its
+own 0.1.1 release after core 0.3.2. Full detail: [Governance
+profiles](../profile.md#which-profile-governs-a-session-032).
+
+### 11.10 Operations rules and the two field contracts (0.3.2)
+
+Claude Code Bash calls carry `operation_classification` (§7). A
+`high_consequence.operations` rule has up to three predicates, `domain`
+(value or list), `action` (value or list) and `destructive` (`true` or
+`false`), and **matches only when one individual effect satisfies every
+predicate**; `destructive: null` satisfies neither value and predicates
+are never combined across effects, so `{domain: network, action: modify}`
+does not match `curl -o x URL` and `{domain: cloud_infrastructure,
+destructive: true}` does not match `rm -rf /tmp && aws ec2
+describe-instances`. A match attaches `HIGH_CONSEQUENCE_DETECTED`, the
+same flag the `tools` patterns attach, once per event.
+
+The two contracts on a Bash event: `operation_type` is the **legacy**
+field, unchanged, `EXECUTE` for Bash, still consumed by POL-001,
+`first_write`, task boundaries, memory-write detection and the analyzers;
+`operation_classification` is the **semantic** field, additive and
+authoritative, carrying segments, effects, `domain`, `action`, the
+three-state `destructive`, `complete` and explicit `unknown`. `target_system`
+is derived from the semantic field and stays the compatibility surface
+for `tools` patterns and scope hints. Operations rules apply to Claude
+Code Bash calls only in 0.3.2. Full detail: [Governance
+profiles](../profile.md#operations-rules-032).
 
 ## 12. Sentience Pulse
 

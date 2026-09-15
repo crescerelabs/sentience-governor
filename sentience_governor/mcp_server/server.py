@@ -757,7 +757,12 @@ def build_server() -> Any:
         writes nothing if the live session cannot be identified with
         confidence. `scope` is required and must cover the targets you will
         act on (e.g. ["filesystem"], ["shell"], ["web"]); an empty or
-        mismatched scope still trips a scope-intent mismatch.
+        mismatched scope still trips a scope-intent mismatch. A Bash call's
+        target is `shell/<domain>` when its classification is complete and
+        single-domain (`shell/version_control` for `git status`) and plain
+        `shell` otherwise, so `["shell"]` covers every Bash call while a
+        narrower hint such as `["shell/version_control"]` covers only
+        commands the classifier read as that one domain.
         """
         return declare_intent_payload(objective, scope)
 
