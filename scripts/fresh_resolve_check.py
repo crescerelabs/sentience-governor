@@ -139,11 +139,119 @@ def smoke_base(py: Path) -> Tuple[bool, str]:
     return True, ""
 
 
-def smoke_mcp(py: Path) -> Tuple[bool, str]:
-    """stdio round-trip listing all seven tools.
+#: The intended PUBLIC MCP tool surface of this release. An independent
+#: release contract, declared here and nowhere else: it is deliberately NOT
+#: derived from the server implementation under test, so a tool that
+#: disappears, or one that appears without a release decision, fails the gate.
+#: Compared as a SET: MCP does not guarantee tool ordering and Sentience does
+#: not promise one. Update this only as part of a release that changes the
+#: public surface, and record the change.
+EXPECTED_MCP_TOOLS = frozenset({
+    "sentience_declare_intent",
+    "sentience_explain",
+    "sentience_intent",
+    "sentience_profile_view",
+    "sentience_pulse",
+    "sentience_scan",
+    "sentience_session_status",
+    "sentience_violations",
+})
 
-    The check that would have caught the v0.3.0 defect. An import of `mcp`
-    succeeds under 2.x; it is *serving* that fails.
+#: The `sentience_explain` response contract the round-trip verifies.
+EXPECTED_EXPLAIN_METHODOLOGY_VERSION = 1
+
+
+def validate_tool_surface(names, expected=EXPECTED_MCP_TOOLS) -> None:
+    """Fail unless the returned tool names are exactly the expected set.
+
+    Order-insensitive. Raises AssertionError naming every missing and every
+    unexpected tool, so the gate output says what changed, not just that
+    something did.
+    """
+    got = set(names)
+    missing = sorted(set(expected) - got)
+    unexpected = sorted(got - set(expected))
+    problems = []
+    if missing:
+        problems.append(f"missing expected tool(s): {missing}")
+    if unexpected:
+        problems.append(f"unexpected public tool(s): {unexpected}")
+    if problems:
+        raise AssertionError(
+            "MCP public tool surface does not match the release contract; "
+            + "; ".join(problems)
+            + f"; got {sorted(got)}"
+        )
+
+
+def validate_explain_response(text: str) -> None:
+    """Fail unless the `sentience_explain` payload satisfies its contract."""
+    try:
+        payload = json.loads(text)
+    except (TypeError, ValueError) as exc:
+        raise AssertionError(f"sentience_explain did not return JSON: {exc}; got {text!r:.200}") from exc
+    if not isinstance(payload, dict):
+        raise AssertionError(f"sentience_explain payload is not an object: {text!r:.200}")
+    got = payload.get("methodology_version")
+    if got != EXPECTED_EXPLAIN_METHODOLOGY_VERSION:
+        raise AssertionError(
+            f"sentience_explain methodology_version == {got!r}, "
+            f"expected {EXPECTED_EXPLAIN_METHODOLOGY_VERSION}"
+        )
+
+
+#: Runs INSIDE the fresh venv (`python -c`), where this script is not
+#: installed: it loads the contract functions above from this file by path
+#: (stdlib-only imports at module level), so the fresh environment checks the
+#: same contract the tests pin, and the mcp client comes from the venv.
+_MCP_ROUNDTRIP_CODE = r"""
+import asyncio, importlib.util, sys
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
+
+SERVER, GATE = sys.argv[1], sys.argv[2]
+spec = importlib.util.spec_from_file_location("fresh_resolve_gate", GATE)
+gate = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(gate)
+
+async def main():
+    async with stdio_client(StdioServerParameters(command=SERVER, args=[])) as (r, w):
+        async with ClientSession(r, w) as s:
+            await s.initialize()
+            names = [t.name for t in (await s.list_tools()).tools]
+            gate.validate_tool_surface(names)
+            res = await s.call_tool("sentience_explain", {})
+            text = "".join(getattr(c, "text", "") for c in res.content)
+            gate.validate_explain_response(text)
+    print("ROUNDTRIP_OK")
+
+asyncio.run(main())
+"""
+
+
+def mcp_roundtrip(py: Path, server: Path, timeout: int = 180) -> Tuple[bool, str]:
+    """Initialize `server` over stdio from `py`'s environment, validate the
+    public tool surface against EXPECTED_MCP_TOOLS, call `sentience_explain`
+    and validate its response contract."""
+    r = subprocess.run([str(py), "-c", _MCP_ROUNDTRIP_CODE, str(server), str(Path(__file__).resolve())],
+                       capture_output=True, text=True, timeout=timeout, env=_clean_env())
+    out = (r.stdout + r.stderr)
+    # Keep the assertion, if any, visible: the tail of an exception-group
+    # traceback is not where the message lives.
+    tail = out[-3000:]
+    lines = [ln for ln in out.splitlines() if "AssertionError" in ln]
+    if lines and lines[-1] not in tail:
+        tail = lines[-1] + "\n" + tail
+    return (r.returncode == 0 and "ROUNDTRIP_OK" in out), tail
+
+
+def smoke_mcp(py: Path) -> Tuple[bool, str]:
+    """stdio round-trip against the intended public tool surface.
+
+    The check that would have caught the v0.3.0 defect (an import of `mcp`
+    succeeds under 2.x; it is *serving* that fails) and the v0.3.2 finding (a
+    count hard-coded at v0.3.0.1 went stale when v0.3.1.1 added a tool, and
+    the gate reported a failure that was not a product failure).
 
     The server binary is resolved from **this venv's** `bin/`, never via
     `shutil.which`. A PATH lookup would find whatever `sentience-mcp-server` the
@@ -153,33 +261,7 @@ def smoke_mcp(py: Path) -> Tuple[bool, str]:
     server = py.parent / "sentience-mcp-server"
     if not server.is_file():
         return False, f"{server} not present: the wheel did not install the console script"
-    code = r"""
-import asyncio, json, sys
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
-
-EXPECTED = 7
-SERVER = sys.argv[1] if len(sys.argv) > 1 else None
-
-async def main():
-    server = SERVER
-    assert server, "server path not supplied"
-    async with stdio_client(StdioServerParameters(command=server, args=[])) as (r, w):
-        async with ClientSession(r, w) as s:
-            await s.initialize()
-            tools = sorted(t.name for t in (await s.list_tools()).tools)
-            assert len(tools) == EXPECTED, f"expected {EXPECTED} tools, got {len(tools)}: {tools}"
-            res = await s.call_tool("sentience_explain", {})
-            text = "".join(getattr(c, "text", "") for c in res.content)
-            assert json.loads(text).get("methodology_version") == 1, "explain round-trip failed"
-    print("ROUNDTRIP_OK")
-
-asyncio.run(main())
-"""
-    r = subprocess.run([str(py), "-c", code, str(server)], capture_output=True,
-                       text=True, timeout=180, env=_clean_env())
-    out = (r.stdout + r.stderr)[-3000:]
-    return (r.returncode == 0 and "ROUNDTRIP_OK" in out), out
+    return mcp_roundtrip(py, server)
 
 
 def smoke_dev(py: Path) -> Tuple[bool, str]:
@@ -203,7 +285,7 @@ def smoke_demo(py: Path) -> Tuple[bool, str]:
 
 EXTRAS = [
     ("base", "", smoke_base, "sentience --version, sentience explain"),
-    ("mcp", "[mcp]", smoke_mcp, "stdio round-trip listing 7 tools"),
+    ("mcp", "[mcp]", smoke_mcp, "stdio round-trip and public tool surface"),
     ("dev", "[dev]", smoke_dev, "collect the suite"),
     ("demo", "[demo]", smoke_demo, "RESOLVE AND IMPORT ONLY (see note)"),
 ]
