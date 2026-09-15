@@ -1,32 +1,55 @@
 #!/usr/bin/env python3
-"""Decide whether the Pydantic AI integration matrix applies to this tree.
+"""Decide HOW the Pydantic AI integration matrix runs against this tree.
 
-The companion distribution `pydantic-ai-governor` publishes a deliberate,
-narrow dependency range on `sentience-governor` (its pyproject.toml). When
-the core version in this tree lies OUTSIDE that range, installing the two
-together is not a valid test of the candidate: pip satisfies the
-companion's pin by pulling a published core over the editable one and the
-suite runs in a mixed environment. In that case the integration matrix is
-NOT APPLICABLE and says so; the companion's own release widens the range
-when it has verified the new core (its compatibility proof lives there).
+Two compatibility concepts, kept distinct:
 
-When the core version lies INSIDE the declared range, the matrix applies
-exactly as before and every install and test step runs; failures fail CI.
+* **Declared package compatibility.** The companion distribution
+  `pydantic-ai-governor` publishes a deliberate, narrow dependency range on
+  `sentience-governor` (its pyproject.toml). The core version in this tree
+  either lies inside that range (the pair is officially installable through
+  normal dependency resolution) or outside it (normal pip co-installation is
+  unsupported until the companion widens its range).
+
+* **Behavioral backward compatibility.** Whether the companion's own test
+  suite still passes against the core candidate in this tree, regardless of
+  what the companion's metadata declares.
+
+The published range decides the first; it never decides the second. So the
+helper reports a MODE rather than "run versus skip":
+
+  mode=declared-compatible     core inside the declared range: install the
+                               pair through normal dependency resolution and
+                               run the companion suite; any failure fails CI.
+  mode=backward-compat-probe   core outside the declared range: install the
+                               branch core explicitly, install the companion
+                               WITHOUT its dependency declaration (so pip
+                               cannot replace or downgrade the candidate),
+                               install the companion's non-core requirements
+                               explicitly, assert the environment holds the
+                               candidate, then run the complete companion
+                               suite; any failure fails CI.
 
 Exit codes:
-  0  a decision was reached (see `applicable=` in the output)
+  0  a decision was reached (see `mode=` in the output)
   2  the metadata could not be read or parsed; the caller must FAIL, never
      silently skip
 
 Outputs (stdout, and appended to $GITHUB_OUTPUT when set):
-  applicable=true|false
+  mode=declared-compatible|backward-compat-probe
+  declared_compatible=true|false
   core_version=<version>
   companion_version=<version>
   companion_requirement=<specifier>
   message=<one-line explanation>
 
-Nothing here is hard-coded to a particular release: applicability is
-derived from the two pyproject files as they are.
+`--write-probe-requirements PATH` additionally writes the companion's
+declared requirements EXCEPT its `sentience-governor` line (runtime
+dependencies plus the `dev` extra, markers preserved) as a pip requirements
+file, so the probe installs exactly what the companion declares, minus the
+core pin that would fight the candidate.
+
+Nothing here is hard-coded to a particular release: everything is derived
+from the two pyproject files as they are.
 """
 
 from __future__ import annotations
@@ -44,10 +67,17 @@ COMPANION_PYPROJECT = ROOT / "integrations" / "pydantic-ai-governor" / "pyprojec
 CORE_DIST = "sentience-governor"
 COMPANION_DIST = "pydantic-ai-governor"
 
+MODE_DECLARED = "declared-compatible"
+MODE_PROBE = "backward-compat-probe"
+
 
 class MetadataError(Exception):
     """Unreadable or malformed metadata. Callers must fail, not skip."""
 
+
+# ---------------------------------------------------------------------------
+# metadata reading
+# ---------------------------------------------------------------------------
 
 def _load_toml(path: Path) -> dict:
     try:
@@ -72,15 +102,19 @@ def _load_toml(path: Path) -> dict:
 
 def _minimal_toml(text: str, path: Path) -> dict:
     """Strict fallback for interpreters without a TOML parser: reads only
-    `[project] version = "..."` and the `dependencies = [ ... ]` list of
-    quoted strings. Anything it cannot find is a MetadataError."""
+    `[project] version = "..."`, the `dependencies = [ ... ]` list and the
+    `[project.optional-dependencies] dev = [ ... ]` list of quoted strings.
+    Anything it cannot find is a MetadataError."""
     version = re.search(r'^version\s*=\s*"([^"]+)"', text, re.M)
     deps_block = re.search(r"^dependencies\s*=\s*\[(.*?)\]", text, re.M | re.S)
+    dev_block = re.search(r"^dev\s*=\s*\[(.*?)\]", text, re.M | re.S)
     project: dict = {}
     if version:
         project["version"] = version.group(1)
     if deps_block:
         project["dependencies"] = re.findall(r'"([^"]+)"', deps_block.group(1))
+    if dev_block:
+        project["optional-dependencies"] = {"dev": re.findall(r'"([^"]+)"', dev_block.group(1))}
     if not project:
         raise MetadataError(f"{path}: no parsable [project] fields (no TOML parser available)")
     return {"project": project}
@@ -94,18 +128,29 @@ def read_version(pyproject: Path) -> str:
     return version.strip()
 
 
-def read_core_requirement(companion_pyproject: Path) -> str:
-    """The companion's declared requirement on core, e.g. '>=0.3.1.2,<0.3.2'."""
+def _dependencies(companion_pyproject: Path) -> Tuple[List[str], List[str]]:
+    """(runtime dependencies, dev extra) as declared, validated as string lists."""
     data = _load_toml(companion_pyproject)
-    deps = (data.get("project") or {}).get("dependencies")
+    project = data.get("project") or {}
+    deps = project.get("dependencies")
     if not isinstance(deps, list):
         raise MetadataError(f"{companion_pyproject}: [project].dependencies missing or not a list")
-    matches: List[str] = []
     for dep in deps:
         if not isinstance(dep, str):
             raise MetadataError(f"{companion_pyproject}: dependency entry is not a string: {dep!r}")
+    dev = (project.get("optional-dependencies") or {}).get("dev") or []
+    if not isinstance(dev, list) or any(not isinstance(d, str) for d in dev):
+        raise MetadataError(f"{companion_pyproject}: [project.optional-dependencies].dev is not a list of strings")
+    return list(deps), list(dev)
+
+
+def read_core_requirement(companion_pyproject: Path) -> str:
+    """The companion's declared requirement on core, e.g. '>=0.3.1.2,<0.3.2'."""
+    deps, _ = _dependencies(companion_pyproject)
+    matches: List[str] = []
+    for dep in deps:
         name, _, spec = _split_requirement(dep)
-        if name.lower().replace("_", "-") == CORE_DIST:
+        if _is_core(name):
             matches.append(spec)
     if len(matches) != 1:
         raise MetadataError(
@@ -117,8 +162,26 @@ def read_core_requirement(companion_pyproject: Path) -> str:
     return spec
 
 
+def non_core_requirements(companion_pyproject: Path) -> List[str]:
+    """Every declared requirement except the core pin: runtime dependencies
+    plus the `dev` extra, markers preserved, in declaration order."""
+    deps, dev = _dependencies(companion_pyproject)
+    out: List[str] = []
+    for dep in deps + dev:
+        name, _, _ = _split_requirement(dep)
+        if not _is_core(name):
+            out.append(dep.strip())
+    if not out:
+        raise MetadataError(f"{companion_pyproject}: no non-core requirements declared")
+    return out
+
+
+def _is_core(name: str) -> bool:
+    return name.lower().replace("_", "-") == CORE_DIST
+
+
 def _split_requirement(dep: str) -> Tuple[str, str, str]:
-    """('name', extras, specifier) for a PEP 508 string without markers/URLs."""
+    """('name', extras, specifier) for a PEP 508 string; markers are dropped."""
     body = dep.split(";", 1)[0].strip()
     m = re.match(r"^([A-Za-z0-9][A-Za-z0-9._-]*)\s*(\[[^\]]*\])?\s*(.*)$", body)
     if not m:
@@ -126,9 +189,13 @@ def _split_requirement(dep: str) -> Tuple[str, str, str]:
     return m.group(1), m.group(2) or "", m.group(3).strip()
 
 
+# ---------------------------------------------------------------------------
+# decision
+# ---------------------------------------------------------------------------
+
 def decide(core_version: str, requirement: str) -> bool:
-    """True iff `core_version` satisfies `requirement`. Raises MetadataError
-    on an unparsable version or specifier."""
+    """True iff `core_version` satisfies `requirement` (declared compatibility).
+    Raises MetadataError on an unparsable version or specifier."""
     try:
         from packaging.specifiers import InvalidSpecifier, SpecifierSet
         from packaging.version import InvalidVersion, Version
@@ -142,8 +209,8 @@ def decide(core_version: str, requirement: str) -> bool:
         version = Version(core_version)
     except InvalidVersion as exc:
         raise MetadataError(f"unparsable core version {core_version!r}: {exc}") from exc
-    # prereleases=True so a pre-release core inside the range is applicable
-    # rather than silently excluded by PEP 440's default handling.
+    # prereleases=True so a pre-release core inside the range counts as
+    # declared-compatible rather than being excluded by PEP 440's default.
     return spec.contains(version, prereleases=True)
 
 
@@ -155,20 +222,23 @@ def evaluate(
     core_version = core_version_override or read_version(core_pyproject)
     companion_version = read_version(companion_pyproject)
     requirement = read_core_requirement(companion_pyproject)
-    applicable = decide(core_version, requirement)
-    if applicable:
+    declared = decide(core_version, requirement)
+    mode = MODE_DECLARED if declared else MODE_PROBE
+    if declared:
         message = (
             f"{COMPANION_DIST} {companion_version} declares {CORE_DIST} {requirement}; "
-            f"branch core is {core_version}; integration matrix applies."
+            f"branch core is {core_version}; declared package compatibility: YES; "
+            f"the pair installs through normal dependency resolution."
         )
     else:
         message = (
             f"{COMPANION_DIST} {companion_version} declares {CORE_DIST} {requirement}; "
-            f"branch core is {core_version}; integration matrix is not applicable to this "
-            f"declared package pair."
+            f"branch core is {core_version}; declared package compatibility: NO; "
+            f"running the behavioral backward-compatibility probe against the branch candidate."
         )
     return {
-        "applicable": applicable,
+        "mode": mode,
+        "declared_compatible": declared,
         "core_version": core_version,
         "companion_version": companion_version,
         "companion_requirement": requirement,
@@ -176,19 +246,31 @@ def evaluate(
     }
 
 
+# ---------------------------------------------------------------------------
+# command line
+# ---------------------------------------------------------------------------
+
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--core-pyproject", type=Path, default=CORE_PYPROJECT)
     ap.add_argument("--companion-pyproject", type=Path, default=COMPANION_PYPROJECT)
     ap.add_argument("--core-version", default=None, help="override the core version (testing)")
+    ap.add_argument(
+        "--write-probe-requirements", type=Path, default=None,
+        help="write the companion's non-core requirements (runtime + dev, markers kept) to this file",
+    )
     args = ap.parse_args(argv)
     try:
         result = evaluate(args.core_pyproject, args.companion_pyproject, args.core_version)
+        if args.write_probe_requirements is not None:
+            reqs = non_core_requirements(args.companion_pyproject)
+            args.write_probe_requirements.write_text("\n".join(reqs) + "\n", encoding="utf-8")
     except MetadataError as exc:
         print(f"integration_applicability: METADATA ERROR: {exc}", file=sys.stderr)
         return 2
     lines = [
-        f"applicable={'true' if result['applicable'] else 'false'}",
+        f"mode={result['mode']}",
+        f"declared_compatible={'true' if result['declared_compatible'] else 'false'}",
         f"core_version={result['core_version']}",
         f"companion_version={result['companion_version']}",
         f"companion_requirement={result['companion_requirement']}",
@@ -196,6 +278,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     ]
     for line in lines:
         print(line)
+    if args.write_probe_requirements is not None:
+        print(f"probe_requirements={args.write_probe_requirements}")
     out = os.environ.get("GITHUB_OUTPUT")
     if out:
         with open(out, "a", encoding="utf-8") as fh:

@@ -12,19 +12,33 @@ name: integration-pydantic-ai
 # integration's own tests. It never runs the core suite, and `test.yml`
 # never runs these.
 #
-# Applicability guard. The integration publishes a deliberate, narrow
-# dependency range on core. When the core version in this tree lies
-# outside that range, installing the pair is not a valid test: pip would
-# satisfy the integration's pin by pulling a published core over the
-# editable one, and the suite would run in a mixed environment. So each
-# leg first derives applicability from the two pyproject files
-# (scripts/integration_applicability.py). Inside the range every install
-# and test step runs exactly as before and failures fail CI; outside it
-# the leg reports NOT APPLICABLE with both versions and the declared
-# boundary and finishes without installing or testing. Malformed metadata
-# fails the leg rather than skipping it. Nothing is hard-coded to a
-# release: the integration's own next release, which widens its range
-# after verifying the new core, makes the matrix applicable again.
+# Two compatibility concepts, two execution modes
+# (scripts/integration_applicability.py decides which, from the two
+# pyproject files; nothing is hard-coded to a release).
+#
+# * Declared package compatibility: the integration publishes a
+#   deliberate, narrow dependency range on core. When the core in this
+#   tree is INSIDE that range (mode `declared-compatible`), the pair is
+#   installed through normal dependency resolution and the suite runs;
+#   any failure fails CI. This is the official package-compatibility path.
+#
+# * Behavioral backward compatibility: when the core in this tree is
+#   OUTSIDE the declared range (mode `backward-compat-probe`), normal
+#   co-installation is unsupported and would make pip pull a published
+#   core over the candidate (a mixed environment, not a valid test). The
+#   published range decides installability; it does not decide whether
+#   the older integration still works against the new core. So the probe
+#   installs the branch core explicitly, installs the integration WITHOUT
+#   its dependency declaration (`--no-deps`), installs the integration's
+#   own non-core requirements explicitly, asserts the environment holds
+#   the candidate and nothing else, and runs the COMPLETE integration
+#   suite; any failure fails CI. Malformed metadata fails the leg.
+#
+# One integration test asserts declared package compatibility itself
+# (`test_installed_governor_core_is_inside_the_declared_range`). In probe
+# mode that assertion is false by construction and is run on its own as
+# the declared-compatibility report; the behavioral suite is every other
+# test. Nothing is modified in the integration to achieve this.
 on:
   push:
     branches: [main]
@@ -54,6 +68,11 @@ jobs:
 
     name: py${{ matrix.python-version }} · pydantic-ai ${{ matrix.pydantic-ai }}
 
+    env:
+      # Node id relative to the integration's own pytest rootdir
+      # (integrations/pydantic-ai-governor carries its own pytest config).
+      DECLARED_RANGE_TEST: tests/test_environment_and_analyzers.py::test_installed_governor_core_is_inside_the_declared_range
+
     steps:
       - uses: actions/checkout@v4
 
@@ -62,25 +81,22 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Determine applicability of this core to the integration's declared range
-        id: applicability
+      - name: Determine compatibility mode from the two pyproject files
+        id: mode
         run: |
           python -m pip install --upgrade pip
           python -m pip install "packaging>=22" "tomli>=2.0; python_version < '3.11'"
-          python scripts/integration_applicability.py
+          python scripts/integration_applicability.py \
+            --write-probe-requirements probe-requirements.txt
 
-      - name: Not applicable to this declared package pair
-        if: steps.applicability.outputs.applicable != 'true'
+      # ---------------------------------------------------------------
+      # Mode A: declared-compatible pair, normal dependency resolution.
+      # ---------------------------------------------------------------
+      - name: "Mode A: install core and the integration (normal dependency resolution)"
+        if: steps.mode.outputs.mode == 'declared-compatible'
         run: |
-          echo "::notice title=integration matrix not applicable::${{ steps.applicability.outputs.message }}"
-          echo "${{ steps.applicability.outputs.message }}"
-          echo "The integration's compatibility proof for a core outside its declared range is the"
-          echo "local widened-pin validation recorded with the release; its own matrix runs again once"
-          echo "it declares a range that admits this core."
-
-      - name: Install core and the integration
-        if: steps.applicability.outputs.applicable == 'true'
-        run: |
+          echo "Declared package compatibility: YES"
+          echo "${{ steps.mode.outputs.message }}"
           # Core first, from this tree rather than from PyPI: the
           # integration declares a dependency on published core, and
           # installing it here would test the released core instead of
@@ -88,24 +104,114 @@ jobs:
           python -m pip install -e .
           python -m pip install -e "./integrations/pydantic-ai-governor[dev]"
 
+      # ---------------------------------------------------------------
+      # Mode B: behavioral backward-compatibility probe.
+      # ---------------------------------------------------------------
+      - name: "Mode B: install the branch core candidate and the integration without its core pin"
+        if: steps.mode.outputs.mode == 'backward-compat-probe'
+        run: |
+          echo "Declared package compatibility: NO"
+          echo "Behavioral backward-compatibility probe: RUNNING"
+          echo "${{ steps.mode.outputs.message }}"
+          # 1. the candidate core, from this tree
+          python -m pip install -e .
+          # 2. the integration's code only: its dependency declaration is
+          #    not consulted, so pip cannot replace or downgrade the candidate
+          python -m pip install --no-deps -e "./integrations/pydantic-ai-governor"
+          # 3. the integration's own non-core requirements (runtime + dev,
+          #    markers preserved), written from its pyproject by the helper
+          echo "--- probe requirements (integration metadata minus the core pin) ---"
+          cat probe-requirements.txt
+          python -m pip install -r probe-requirements.txt
+
       - name: Pin pydantic-ai-slim to the floor of the declared range
-        if: steps.applicability.outputs.applicable == 'true' && matrix.pydantic-ai == 'floor'
+        if: matrix.pydantic-ai == 'floor'
         run: python -m pip install "pydantic-ai-slim==2.37.0"
 
       - name: Resolve pydantic-ai-slim to the ceiling of the declared range
-        if: steps.applicability.outputs.applicable == 'true' && matrix.pydantic-ai == 'ceiling'
+        if: matrix.pydantic-ai == 'ceiling'
         run: |
           python -m pip install --upgrade "pydantic-ai-slim>=2.37.0,<2.38"
 
       - name: Report the resolved environment
-        if: steps.applicability.outputs.applicable == 'true'
         run: |
           python -c "import sys; print('python', sys.version)"
-          python -m pip show pydantic-ai-slim sentience-governor \
-            | grep -E "^(Name|Version):"
+          python -m pip show pydantic-ai-slim sentience-governor pydantic-ai-governor \
+            | grep -E "^(Name|Version|Location|Editable project location):"
+
+      # The assertion that prevents the mixed-environment bug from recurring
+      # silently: in probe mode the installed AND imported core must be the
+      # branch candidate (version from this tree's pyproject, code from this
+      # checkout), with no second core distribution present.
+      - name: "Mode B: assert the environment holds the branch candidate"
+        if: steps.mode.outputs.mode == 'backward-compat-probe'
+        env:
+          EXPECTED_CORE_VERSION: ${{ steps.mode.outputs.core_version }}
+        run: |
+          python - <<'PY'
+          import importlib.metadata as md, os, pathlib, sys
+          expected = os.environ["EXPECTED_CORE_VERSION"]
+          workspace = pathlib.Path(os.environ["GITHUB_WORKSPACE"]).resolve()
+          installed = md.version("sentience-governor")
+          import sentience_governor
+          source = pathlib.Path(sentience_governor.__file__).resolve()
+          # Every discoverable core distribution must be the candidate. The
+          # editable install leaves an egg-info in the checkout that is also
+          # discoverable from the workspace, so count distinct versions, not
+          # entries: a second VERSION is the mixed environment.
+          versions = sorted({d.version for d in md.distributions()
+                             if (d.metadata["Name"] or "").lower() == "sentience-governor"})
+          problems = []
+          if installed != expected:
+              problems.append(f"installed sentience-governor is {installed}, expected the candidate {expected}")
+          if workspace not in source.parents:
+              problems.append(f"sentience_governor imports from {source}, not from the checkout {workspace}")
+          if versions != [expected]:
+              problems.append(f"sentience-governor distributions present: {versions}, expected only {expected}")
+          if problems:
+              print("ENVIRONMENT ASSERTION FAILED (mixed or downgraded core):")
+              for p in problems: print("  -", p)
+              sys.exit(1)
+          print(f"environment OK: sentience-governor == {installed} from {source.parent}")
+          PY
+
+      - name: "Mode B: declared package compatibility check (expected to report NO)"
+        if: steps.mode.outputs.mode == 'backward-compat-probe'
+        run: |
+          # This single integration test asserts that the installed core is
+          # inside the integration's DECLARED range. With the candidate
+          # installed it reports the declared incompatibility, which is the
+          # expected finding of this mode, not a behavioral failure. Its
+          # output is shown; its exit status is recorded, not enforced.
+          set +e
+          python -m pytest "integrations/pydantic-ai-governor/$DECLARED_RANGE_TEST" -q -p no:cacheprovider
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ]; then
+            echo "Declared package compatibility: YES (unexpected in probe mode; the range now admits this core)"
+          else
+            echo "Declared package compatibility: NO (as declared by the published integration metadata)"
+          fi
 
       # Explicit path, and only this path. Running from the repository
       # root would pick up the root config and discover the core suite.
-      - name: Run the integration suite
-        if: steps.applicability.outputs.applicable == 'true'
+      - name: "Mode A: run the integration suite"
+        if: steps.mode.outputs.mode == 'declared-compatible'
         run: python -m pytest integrations/pydantic-ai-governor/tests -v
+
+      - name: "Mode B: run the complete integration suite as the behavioral probe"
+        if: steps.mode.outputs.mode == 'backward-compat-probe'
+        run: |
+          # Every integration test except the declared-range assertion above,
+          # against the asserted branch candidate. Any failure fails CI.
+          python -m pytest integrations/pydantic-ai-governor/tests -v \
+            --deselect "$DECLARED_RANGE_TEST"
+
+      - name: "Mode B: behavioral backward compatibility result"
+        if: steps.mode.outputs.mode == 'backward-compat-probe'
+        run: |
+          echo "Behavioral backward compatibility: PASS"
+          echo "Published pydantic-ai-governor ${{ steps.mode.outputs.companion_version }} still declares core ${{ steps.mode.outputs.companion_requirement }}."
+          echo "Normal pip co-installation with core ${{ steps.mode.outputs.core_version }} remains unsupported until"
+          echo "a pydantic-ai-governor release widens the declared range."
+          echo "::notice title=behavioral backward compatibility PASS::${{ steps.mode.outputs.message }} Behavioral suite passed against the branch candidate."
