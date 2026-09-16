@@ -8,7 +8,7 @@ name = "pydantic-ai-governor"
 # from installed metadata (see src/pydantic_ai_governor/__init__.py), never
 # hand-maintained, so a second source cannot drift from this one. The core
 # `sentience-governor` version is unrelated and versions independently.
-version = "0.1.0"
+version = "0.1.1"
 description = "Agent Execution Evidence for Pydantic AI, by Sentience Governor"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -46,7 +46,7 @@ classifiers = [
 # Widen only after measured verification, and only in a new release of this
 # distribution. Never relax a bound in place.
 dependencies = [
-    "sentience-governor>=0.3.1.2,<0.3.2",
+    "sentience-governor>=0.3.2,<0.3.3",
     "pydantic-ai-slim>=2.37.0,<2.38",
 ]
 
@@ -62,7 +62,7 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/crescerelabs/sentience-governor"
+Homepage = "https://getsentience.ai"
 Documentation = "https://github.com/crescerelabs/sentience-governor/tree/main/integrations/pydantic-ai-governor"
 Source = "https://github.com/crescerelabs/sentience-governor"
 

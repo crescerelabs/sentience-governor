@@ -184,7 +184,7 @@ def main() -> int:
         "Name: pydantic-ai-governor": "Name: pydantic-ai-governor" in md,
         f"Version: {version}": f"Version: {version}" in md,
         "License-Expression: Apache-2.0": "License-Expression: Apache-2.0" in md,
-        "core bound": "sentience-governor" in md and "<0.3.2" in md,
+        "core bound": "sentience-governor" in md and "<0.3.3" in md,
         "pydantic bound": "pydantic-ai-slim" in md and "<2.38" in md,
         "no core source dependency inversion": "Requires-Dist: pydantic-ai-slim" in md,
     }

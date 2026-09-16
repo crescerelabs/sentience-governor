@@ -9,6 +9,8 @@ and this distribution adheres to [Semantic Versioning](https://semver.org/).
 versions and releases on its own series, keeps its own changelog, and its
 releases do not appear here.
 
+## [0.1.1] — unreleased
+
 ## [0.1.0] — unreleased
 
 First release of the distribution.

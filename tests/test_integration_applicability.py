@@ -54,17 +54,51 @@ def _core(tmp_path: Path, version: str) -> Path:
     return p
 
 
+def _real_companion_metadata():
+    """The companion's version and core requirement read straight from its
+    pyproject with the stdlib parser: the oracle for every real-pair test, so
+    the suite never hard-codes what the companion currently declares."""
+    import tomllib
+    data = tomllib.loads(REAL_COMPANION.read_text(encoding="utf-8"))["project"]
+    core = [d for d in data["dependencies"] if d.lower().startswith("sentience-governor")]
+    assert len(core) == 1
+    return data["version"], core[0][len("sentience-governor"):].split(";")[0].strip(), data
+
+
+# The 0.1.0-shaped declaration (`<0.3.2`) is kept as a FIXTURE: it is the
+# published metadata that first exercised Mode B against core 0.3.2, and the
+# probe path must stay covered whatever the real companion declares today.
+LEGACY_RANGE = ">=0.3.1.2,<0.3.2"
+
+
 class TestModes:
-    def test_current_companion_with_core_0_3_1_x_is_declared_compatible(self, tmp_path):
-        for v in ("0.3.1.2", "0.3.1.3", "0.3.1.9"):
+    def test_real_pair_mode_is_derived_from_the_real_metadata(self, tmp_path):
+        """For any core version, the real companion's mode is exactly what its
+        own declared range says: no literal pin of the current release."""
+        version, requirement, _ = _real_companion_metadata()
+        for v in ("0.3.1.2", "0.3.1.9", "0.3.2", "0.3.2.1", "0.3.3", "0.4"):
             r = mod.evaluate(_core(tmp_path, v), REAL_COMPANION)
+            expected = mod.decide(v, requirement)
+            assert r["declared_compatible"] is expected, v
+            assert r["mode"] == (mod.MODE_DECLARED if expected else mod.MODE_PROBE), v
+            assert r["companion_version"] == version and r["companion_requirement"] == requirement
+            assert f"pydantic-ai-governor {version} declares sentience-governor {requirement}" in r["message"]
+            assert f"branch core is {v}" in r["message"]
+            assert "not applicable" not in r["message"].lower()
+
+    def test_mode_a_declared_compatible_fixture(self, tmp_path):
+        companion = _companion(tmp_path, [f"sentience-governor{LEGACY_RANGE}", "pydantic-ai-slim>=2.37.0,<2.38"])
+        for v in ("0.3.1.2", "0.3.1.3", "0.3.1.9"):
+            r = mod.evaluate(_core(tmp_path, v), companion)
             assert r["mode"] == mod.MODE_DECLARED and r["declared_compatible"] is True, v
             assert "declared package compatibility: YES" in r["message"]
 
-    def test_current_companion_with_core_0_3_2_is_backward_compat_probe(self, tmp_path):
-        r = mod.evaluate(_core(tmp_path, "0.3.2"), REAL_COMPANION)
+    def test_mode_b_backward_compat_probe_fixture(self, tmp_path):
+        """The exact situation of core 0.3.2 against published companion 0.1.0."""
+        companion = _companion(tmp_path, [f"sentience-governor{LEGACY_RANGE}", "pydantic-ai-slim>=2.37.0,<2.38"])
+        r = mod.evaluate(_core(tmp_path, "0.3.2"), companion)
         assert r["mode"] == mod.MODE_PROBE and r["declared_compatible"] is False
-        assert "pydantic-ai-governor 0.1.0 declares sentience-governor >=0.3.1.2,<0.3.2" in r["message"]
+        assert f"pydantic-ai-governor 0.1.0 declares sentience-governor {LEGACY_RANGE}" in r["message"]
         assert "branch core is 0.3.2" in r["message"]
         assert "declared package compatibility: NO" in r["message"]
         assert "behavioral backward-compatibility probe" in r["message"]
@@ -107,7 +141,11 @@ class TestRangeLogic:
 
 class TestMetadataReading:
     def test_reads_the_real_companion_requirement(self):
-        assert mod.read_core_requirement(REAL_COMPANION) == ">=0.3.1.2,<0.3.2"  # the published 0.1.0 pin, untouched
+        _, requirement, _ = _real_companion_metadata()
+        got = mod.read_core_requirement(REAL_COMPANION)
+        assert got == requirement
+        # A deliberate, bounded range: a floor and a ceiling (0.1.0 plan §16).
+        assert ">=" in got and "<" in got
 
     def test_non_core_requirements_from_the_real_companion(self):
         reqs = mod.non_core_requirements(REAL_COMPANION)
@@ -160,10 +198,14 @@ class TestMetadataReading:
             mod.non_core_requirements(companion)
 
     def test_minimal_parser_fallback_reads_the_same_fields(self):
+        """The no-TOML-parser fallback must agree with the real parser on the
+        real file, whatever the companion currently declares."""
+        version, _, project = _real_companion_metadata()
         text = REAL_COMPANION.read_text(encoding="utf-8")
         data = mod._minimal_toml(text, REAL_COMPANION)
-        assert data["project"]["version"] == "0.1.0"
-        assert "sentience-governor>=0.3.1.2,<0.3.2" in data["project"]["dependencies"]
+        assert data["project"]["version"] == version
+        assert data["project"]["dependencies"] == project["dependencies"]
+        assert data["project"]["optional-dependencies"]["dev"] == project["optional-dependencies"]["dev"]
         assert any(d.startswith("pytest") for d in data["project"]["optional-dependencies"]["dev"])
         with pytest.raises(mod.MetadataError):
             mod._minimal_toml("nothing here", REAL_COMPANION)
@@ -174,10 +216,14 @@ class TestCommandLine:
         return subprocess.run([sys.executable, str(SCRIPT), *args], capture_output=True, text=True, env=env)
 
     def test_probe_mode_exit_zero_with_outputs_and_requirements_file(self, tmp_path):
+        """Mode B on the command line, against the 0.1.0-shaped fixture."""
+        companion = _companion(tmp_path, [f"sentience-governor{LEGACY_RANGE}", "pydantic-ai-slim>=2.37.0,<2.38"],
+                               dev=["pytest>=7.0", "tomli>=2.0; python_version < '3.11'"])
         out = tmp_path / "gh_output"
         reqs = tmp_path / "probe-requirements.txt"
         env = dict(os.environ, GITHUB_OUTPUT=str(out))
-        r = self._run("--core-version", "0.3.2", "--write-probe-requirements", str(reqs), env=env)
+        r = self._run("--companion-pyproject", str(companion), "--core-version", "0.3.2",
+                      "--write-probe-requirements", str(reqs), env=env)
         assert r.returncode == 0, r.stderr
         assert "mode=backward-compat-probe" in r.stdout and "declared_compatible=false" in r.stdout
         assert "declared package compatibility: NO" in r.stdout
@@ -186,10 +232,23 @@ class TestCommandLine:
         lines = reqs.read_text(encoding="utf-8").splitlines()
         assert lines and not any(l.startswith("sentience-governor") for l in lines)
         assert any(l.startswith("pydantic-ai-slim") for l in lines)
+        assert "tomli>=2.0; python_version < '3.11'" in lines  # marker preserved
 
-    def test_declared_mode_exit_zero(self):
-        r = self._run("--core-version", "0.3.1.2")
+    def test_declared_mode_exit_zero(self, tmp_path):
+        """Mode A on the command line, against a fixture inside its own range."""
+        companion = _companion(tmp_path, [f"sentience-governor{LEGACY_RANGE}", "pydantic-ai-slim>=2.37.0,<2.38"])
+        r = self._run("--companion-pyproject", str(companion), "--core-version", "0.3.1.2")
         assert r.returncode == 0 and "mode=declared-compatible" in r.stdout and "declared_compatible=true" in r.stdout
+
+    def test_real_pair_on_the_command_line_matches_evaluate(self):
+        """The real repository pair, exit 0, reporting whatever its metadata
+        implies (declared-compatible once the companion admits this core)."""
+        r = self._run()
+        assert r.returncode == 0, r.stderr
+        expected = mod.evaluate(REAL_CORE, REAL_COMPANION)
+        assert f"mode={expected['mode']}" in r.stdout
+        assert f"declared_compatible={'true' if expected['declared_compatible'] else 'false'}" in r.stdout
+        assert f"companion_version={expected['companion_version']}" in r.stdout
 
     def test_malformed_metadata_exits_two(self, tmp_path):
         companion = _companion(tmp_path, ["pydantic-ai-slim>=2.37.0,<2.38"])
