@@ -18,6 +18,11 @@ from pydantic_ai.capabilities import AbstractCapability
 
 from sentience_governor.cache.cache import InProcessCache
 from sentience_governor.event_builder.builder import EventBuilder
+from sentience_governor.profile.resolver import (
+    SOURCE_NONE,
+    ResolvedProfile,
+    resolve_profile,
+)
 from sentience_governor.schema.events import (
     ErrorType,
     IntentConfidence,
@@ -109,6 +114,10 @@ class SentienceGovernor(AbstractCapability[Any]):
         self._sink: Optional[SinkWriter] = None
         self._declaration: Declaration = self._default
         self._rejection: Optional[str] = None
+        # The one resolution problem (if any) to report when the session
+        # opens: set by `_resolve_profile`, consumed once by
+        # `_report_resolution`, never re-raised during the run.
+        self._resolution_warning: Optional[tuple] = None
         # Nothing per-CALL lives here, deliberately. A resolved
         # classification, a tool name, a tool_use_id: each belongs to one
         # call, and parallel tool calls in a single model response run
@@ -140,6 +149,7 @@ class SentienceGovernor(AbstractCapability[Any]):
         clone._session_id = None
         clone._builder = None
         clone._sink = None
+        clone._resolution_warning = None
         # Derived from `ctx`, which is what the hook's durability contract
         # requires: a worker re-deriving this instance from a deserialized
         # context must reach the same declaration.
@@ -296,19 +306,33 @@ class SentienceGovernor(AbstractCapability[Any]):
         # 1. The Pydantic run id IS the Governor session id.
         self._session_id = ctx.run_id
 
-        # 2. The builder is per-session and holds the session id.
+        # 1b. Resolve the governing profile ONCE for this run, keyed by the
+        # constructor `agent_id`, exactly as core's own single-process
+        # adapters do. One run is one process and one `_open_session`, so
+        # the result is sticky for the run by construction: nothing below
+        # re-reads `resolution.yaml` or the profile file.
+        resolved = self._resolve_profile()
+
+        # 2. The builder is per-session and holds the session id, plus the
+        # resolution provenance core records on AGENT_REGISTERED for
+        # `bound` and `degraded` (and omits for `default` and `none`).
         self._builder = EventBuilder(
             session_manager=self._session_manager,
             cache=self._cache,
             agent_id=self._agent_id,
             session_id=self._session_id,
+            profile_resolution=resolved.source,
+            profile_binding=resolved.binding,
         )
 
         # 3. `allow_concurrent=True` because sibling runs on one Agent share
         # an agent_id, and the default force-closes the sibling's session.
+        # The resolved profile (or None) is bound to the session here; the
+        # fingerprint on every later event comes from core's existing path.
         self._session_manager.session_start(
             session_id=self._session_id,
             agent_id=self._agent_id,
+            profile=resolved.profile,
             allow_concurrent=True,
         )
 
@@ -336,6 +360,58 @@ class SentienceGovernor(AbstractCapability[Any]):
         )
         self._declare_intent()
         self._report_rejection()
+        self._report_resolution()
+
+    def _resolve_profile(self) -> ResolvedProfile:
+        """Core resolution semantics, wrapped so nothing raises into the run.
+
+        `resolve_profile` implements the chain itself: the first matching
+        binding is authoritative; a matched binding whose profile cannot
+        load resolves `degraded` and falls back to the machine default,
+        never a later binding; no match uses the default when present,
+        otherwise no profile. The companion adds no precedence step.
+
+        Core's default step deliberately keeps the loader's behaviour of
+        raising on a malformed or unreadable default profile. An operator's
+        broken file must not break a developer's agent run, so that one
+        case is caught here and the session opens with no profile. Every
+        problem, caught or reported by the resolver, is surfaced once, when
+        the session opens, through `_report_resolution`.
+        """
+        try:
+            resolved = resolve_profile(agent_id=self._agent_id)
+        except Exception as exc:  # the default step may raise; see above
+            detail = f"{exc.__class__.__name__}: {exc}"
+            self._resolution_warning = (
+                f"Sentience Governor could not resolve a governance profile "
+                f"for agent '{self._agent_id}' ({detail}); this run continues "
+                f"with no profile.",
+                f"profile resolution failed: {detail}",
+            )
+            return ResolvedProfile(
+                profile=None, source=SOURCE_NONE, binding=None, warnings=(detail,)
+            )
+        if resolved.warnings:
+            problems = " ".join(resolved.warnings)
+            self._resolution_warning = (
+                f"Sentience Governor resolved the governance profile for agent "
+                f"'{self._agent_id}' with a problem: {problems}",
+                f"profile resolution {resolved.source}: {problems}",
+            )
+        return resolved
+
+    def _report_resolution(self) -> None:
+        """Visible fail-open for a resolution problem: once per session open.
+
+        Fires through the same path as D1 and D2, after registration so the
+        GOVERNANCE_ERROR has a session to belong to, and never again during
+        the run: the tuple is consumed here.
+        """
+        if self._resolution_warning is None:
+            return
+        warning_text, failure_reason = self._resolution_warning
+        self._resolution_warning = None
+        self._fail_open(warning_text, failure_reason)
 
     def _declare_intent(self) -> None:
         """INTENT_DECLARED, honest about where the objective came from.
