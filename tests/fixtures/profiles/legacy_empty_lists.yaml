@@ -1,0 +1,5 @@
+schema_version: 1
+task_boundary:
+  signals: []
+high_consequence:
+  tools: []

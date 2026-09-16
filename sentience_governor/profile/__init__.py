@@ -29,15 +29,26 @@ Module guarantees:
 """
 
 from sentience_governor.profile.loader import (
+    DEFAULT_PROFILE_PATH,
+    DEFAULT_RESOLUTION_PATH,
     GovernanceProfile,
     ProfileValidationResult,
+    canonical_profile_data,
+)
+from sentience_governor.profile.resolver import (
+    ResolvedProfile,
+    resolve_profile,
 )
 from sentience_governor.profile.schema import (
     DEMAND_AT_FIRST_WRITE,
     DEMAND_AT_NEVER,
     DEMAND_AT_SESSION_START,
     ON_MATCH_FLAG,
+    OPERATION_ACTIONS,
+    OPERATION_DOMAINS,
+    OPTIONAL_ADDITIVE_FIELDS,
     SCHEMA_VERSION,
+    SET_VALUED_RULE_PREDICATES,
     SIGNAL_DIR_CHANGE,
     SIGNAL_FILE_TYPE_SHIFT,
     SIGNAL_READ_TO_WRITE_TRANSITION,
@@ -50,6 +61,15 @@ from sentience_governor.profile.schema import (
 __all__ = [
     "GovernanceProfile",
     "ProfileValidationResult",
+    "ResolvedProfile",
+    "resolve_profile",
+    "canonical_profile_data",
+    "DEFAULT_PROFILE_PATH",
+    "DEFAULT_RESOLUTION_PATH",
+    "OPERATION_ACTIONS",
+    "OPERATION_DOMAINS",
+    "OPTIONAL_ADDITIVE_FIELDS",
+    "SET_VALUED_RULE_PREDICATES",
     "SCHEMA_VERSION",
     "DEMAND_AT_FIRST_WRITE",
     "DEMAND_AT_NEVER",

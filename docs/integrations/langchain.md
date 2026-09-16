@@ -40,21 +40,26 @@ For the mechanics behind this, see §6 of the
 
 ## How profiles plug in
 
-If `~/.sentience/profile.yaml` exists when a chain starts, the
-handler loads it transparently and the session runs under it. No
-keyword arguments change; no constructor flags need adjusting.
+When a root run starts, the handler resolves the profile for its
+`agent_id` once, with `resolve_profile(agent_id=...)`: the first matching
+binding in `~/.sentience/resolution.yaml` if there is one, else
+`~/.sentience/profile.yaml` if it exists, else none (0.3.2; a matched
+binding that fails to load is `degraded` and falls to the default without
+consulting a later binding). No keyword arguments change; no constructor
+flags need adjusting, and there is deliberately no `profile=` argument.
 
-You don't import `GovernanceProfile` directly. The handler calls
-`GovernanceProfile.from_default_path_or_none()` internally — when the
-file is absent, the session takes the v0.2.4 code path; when it
-exists, the wrapper enforces the profile's signals.
+You don't import `GovernanceProfile` directly. The resolved profile is
+sticky for the root run by construction; when nothing resolves, the
+session takes the pre-profile code path. LangChain tool calls are **not**
+semantically classified in 0.3.2: `high_consequence.tools` patterns apply,
+`high_consequence.operations` rules do not.
 
 ## Mapping your existing setup
 
 | If you set ... | The profile controls ... |
 | :-- | :-- |
 | `stated_objective="..."` on the handler constructor | how `INTENT_DECLARED` populates. The profile's `demand_at` decides what happens when no objective was supplied. |
-| `agent_id="..."` / `vendor_id="..."` | nothing — these continue to populate `AGENT_REGISTERED` unchanged. v0.2.5 adds optional `profile_loaded` + `profile_schema_version` to that event when a profile is active. |
+| `agent_id="..."` / `vendor_id="..."` | `agent_id` is the key `~/.sentience/resolution.yaml` bindings match against (0.3.2). Both continue to populate `AGENT_REGISTERED`, which also carries `profile_loaded` + `profile_schema_version` when a profile is active and `profile_resolution` + `profile_binding` when it resolved through a binding. |
 | LangChain tools registered on your agent | which `SCOPE_ASSERTED` events fire the new advisory flags. Patterns in `high_consequence.tools` are matched against `<tool_id>:<target_system>`. |
 
 ## What the trace looks like under a profile

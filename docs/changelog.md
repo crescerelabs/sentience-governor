@@ -6,6 +6,50 @@ Breaking changes bump the minor version until 1.0. After 1.0, breaking changes b
 
 ---
 
+## 0.3.2 — 2026-09-15
+
+**Which policy governs this session, what the agent is actually doing, and
+whether that action triggers the governing policy.**
+
+An optional `~/.sentience/resolution.yaml` binds agents to profiles: the first
+`agent_id` pattern that matches is authoritative, the machine default applies
+when nothing matches, and a matched binding whose file cannot be loaded is
+`degraded` rather than falling through to a later one. Resolution happens once
+per session on every surface and is recorded on `AGENT_REGISTERED`
+(`profile_resolution`, `profile_binding`). The Claude Code hook keeps it sticky
+across its per-call processes through a content-addressed snapshot beside the
+trace and a per-session binding in the sidecar, so editing a profile mid-session
+no longer changes that session; lost state recovers fail-open and visibly.
+`sentience profile resolve --agent-id`, `resolve --session-id` and
+`profile snapshots` report what the runtime did, read-only.
+
+Every Claude Code `Bash` event now carries `operation_classification`: the
+command read by a bounded, deterministic rule classifier into segments and
+effects (`domain`, `action`, three-state `destructive`, `complete`). `curl -o x
+URL` is a network read plus a filesystem write that may overwrite; `rm -rf /tmp
+&& aws ec2 describe-instances` is a filesystem delete plus a cloud read, and
+nothing in between. What the classifier cannot read (`./deploy.sh`, `bash -c`,
+anything inside `$(…)`) is an explicit `unknown`, never a guess; it executes
+nothing and calls no model. Bash `target_system` becomes `shell/<domain>` for
+complete single-domain commands and stays `shell` otherwise, so existing
+`Bash:shell` patterns keep matching and `Bash:shell$` narrows.
+
+Profiles gain `high_consequence.operations`: rules over `domain`, `action` and
+`destructive` that match only when one individual effect satisfies every
+predicate, so a destructive filesystem effect and a cloud read in the same
+command never combine into a destructive cloud match. A match attaches the
+existing `HIGH_CONSEQUENCE_DETECTED`; nothing is blocked.
+
+Additive where intended: `operation_type` is unchanged and Bash stays
+`EXECUTE` on it; MCP and LangChain resolve profiles but are not semantically
+classified; `pydantic-ai-governor` 0.1.0 pins core `<0.3.2` and is unchanged,
+with its 0.1.1 companion release to follow separately. Existing profiles keep
+their fingerprint (absent and empty `operations` are identical, rules are an
+unordered set), and public evidence still carries only the 12-character
+fingerprint.
+
+---
+
 ## 0.3.1.2 — 2026-09-01
 
 **Context for the review, over MCP.** The scan summary could say how many

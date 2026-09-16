@@ -93,7 +93,9 @@ from typing import Any, Dict, List, Optional, Tuple
 from sentience_governor.cache.cache import InProcessCache
 from sentience_governor.event_builder.builder import EventBuilder
 from sentience_governor.profile import GovernanceProfile
+from sentience_governor.profile.resolver import ResolvedProfile, resolve_profile
 from sentience_governor.schema.events import (
+    OperationClassification,
     ClassificationSource,
     DeploymentMode,
     DetectionMechanism,
@@ -110,11 +112,24 @@ from sentience_governor.wrapper.token_extraction import (
     extract_anthropic_usage,
 )
 from sentience_governor.wrapper.claude_code_transcript import parse_transcript_file
+from sentience_governor.wrapper.shell_classification import (
+    classify_shell_command,
+    target_system_for,
+)
 from sentience_governor.session_manager.resumption import (
+    Registration,
     ResumedState,
+    build_binding_entry,
+    content_hash_of,
+    ensure_profile_snapshot,
     file_size,
+    profiles_dir_for,
     read_emitted_turns,
+    read_profile_snapshot,
+    read_registration,
+    read_session_binding,
     record_emitted_turns,
+    record_session_binding,
     resume_session_state,
     sink_lock,
     update_session_state,
@@ -302,6 +317,31 @@ def _resolve_deployment_mode() -> DeploymentMode:
         return _DEFAULT_DEPLOYMENT_MODE
 
 
+_BASH_TOOL_NAME = "Bash"
+
+
+def _classify_bash_call(ctx: "_HookContext") -> Tuple[Optional[OperationClassification], str]:
+    """v0.3.2: ``(operation_classification, target_system)`` for a tool call.
+
+    Bash calls are classified from ``tool_input.command`` by the pure
+    classifier; the coarse ``target_system`` is derived from the result
+    (``shell`` or ``shell/<domain>``). A missing or non-string command is
+    still classified (to an explicit unknown), so every Bash SCOPE_ASSERTED
+    carries the object. Non-Bash calls return ``(None, <legacy target>)``.
+    Fail-open: any defect here degrades to the legacy ``shell`` target with
+    no classification rather than preventing the event.
+    """
+    _op, legacy_target = _infer_tool_mapping(ctx.tool_name)
+    if ctx.tool_name != _BASH_TOOL_NAME:
+        return None, legacy_target
+    try:
+        classification = classify_shell_command(ctx.tool_input.get("command"))
+        return classification, target_system_for(classification)
+    except Exception as exc:  # pragma: no cover - the classifier never raises
+        logger.warning("claude_code_hook: shell classification failed: %s", exc)
+        return None, legacy_target
+
+
 def _infer_tool_mapping(tool_name: str) -> Tuple[OperationType, str]:
     """Map a Claude Code tool name to (OperationType, target_system).
 
@@ -405,6 +445,263 @@ def _first_declared_intent(
     except OSError:
         return None
     return None
+
+
+# ---------------------------------------------------------------------------
+# v0.3.2 — sticky session binding
+# ---------------------------------------------------------------------------
+#
+# Each hook invocation is a fresh process, and per-session policy resolution
+# (profile/resolver.py) is a pure function of configuration. Without a
+# durable binding, editing resolution.yaml or the bound profile mid-session
+# would silently change which policy governs the session's later events.
+#
+# The first process for a session RESOLVES, materializes the resolved
+# profile's canonical bytes into a verified content-addressed snapshot beside
+# the sink, records a per-session binding in the sidecar, and only then
+# registers the session. Every later process (PreToolUse, PostToolUse,
+# SessionEnd, and the MCP declare_intent write path) REHYDRATES the identical
+# GovernanceProfile from the binding and snapshot: full-hash integrity first,
+# then the short fingerprint, then agreement with the trace's own
+# AGENT_REGISTERED. Anything that fails takes a fail-open RECOVERY path that
+# resolves fresh, compares with the registration, and re-materializes; the
+# only case in which later events can carry a different fingerprint than the
+# registration is a lost binding plus a changed configuration, and that case
+# is logged and marked "reresolve" so it is visible.
+#
+# Other adapters run one process per session and are sticky by construction;
+# they call resolve_profile directly and never touch this machinery.
+
+
+def _runtime_version() -> str:
+    try:
+        from importlib.metadata import version
+
+        return version("sentience-governor")
+    except Exception:  # pragma: no cover - metadata absent in odd installs
+        return "unknown"
+
+
+_BOUND_BY = f"claude_code_hook/{_runtime_version()}"
+
+_RECOVERED_REMATERIALIZED = "rematerialized"
+_RECOVERED_RERESOLVE = "reresolve"
+
+
+@dataclass(frozen=True)
+class _BoundProfile:
+    """What governs this process: the profile plus the binding facts."""
+
+    profile: Optional[GovernanceProfile]
+    resolution: str
+    binding: Optional[str]
+    fingerprint: Optional[str]
+    content_hash: Optional[str]
+    recovered_from: Optional[str]
+
+
+def _establish_or_rehydrate_binding(
+    sink_path: Path,
+    session_id: str,
+    agent_id: str,
+    resumed: Optional[ResumedState],
+) -> _BoundProfile:
+    """Return the profile that governs ``session_id`` for this process.
+
+    Called under ``sink_lock`` immediately after ``resume_session_state`` and
+    before ``session_start``. ``resumed`` is accepted for symmetry with the
+    call site; the decision is driven by the binding and the registration,
+    which is what makes the crash-between-binding-and-registration case
+    (binding present, no events yet) come out right.
+    """
+    del resumed  # see docstring
+    entry = read_session_binding(sink_path, session_id)
+    if entry is not None:
+        bound = _rehydrate_binding(sink_path, entry)
+        if bound is not None:
+            if bound.recovered_from == _RECOVERED_RERESOLVE:
+                # A re-resolved binding is, by definition, one that disagrees
+                # with the registration: the divergence was warned once when
+                # it was written and is what the marker records (CP1-D §11
+                # row 12d: one warning, later events on the fresh profile).
+                # Re-checking it here would re-resolve, and warn, on every
+                # later process, which is the opposite of sticky.
+                return bound
+            registration = read_registration(sink_path, session_id)
+            if not registration.found or _bound_agrees(bound, registration):
+                return bound
+            logger.warning(
+                "claude_code_hook: session %s binding disagrees with its "
+                "registration; re-resolving",
+                session_id[:12],
+            )
+    return _recover_binding(sink_path, session_id, agent_id)
+
+
+def _rehydrate_binding(sink_path: Path, entry: dict) -> Optional[_BoundProfile]:
+    """Rebuild the governing profile from a validated binding entry.
+
+    ``None`` on any integrity failure (missing or corrupt snapshot, hash
+    mismatch, fingerprint mismatch), each logged by the reader that found it.
+    The full-hash check happens inside ``read_profile_snapshot`` before any
+    fingerprint is computed.
+    """
+    resolution = entry["resolution"]
+    binding = entry.get("binding")
+    recovered_from = entry.get("recovered_from")
+    content_hash = entry.get("profile_content_hash")
+    if content_hash is None:
+        # Bound to NO profile: stays that way even if a profile file has
+        # since appeared. Distinct from "no binding".
+        return _BoundProfile(None, resolution, binding, None, None, recovered_from)
+
+    data = read_profile_snapshot(Path(sink_path).parent / entry["snapshot"], content_hash)
+    if data is None:
+        return None
+    try:
+        profile = GovernanceProfile(
+            json.loads(data.decode("utf-8")),
+            source_path=Path(entry["source_path"]),
+        )
+    except (ValueError, TypeError) as exc:
+        logger.warning("claude_code_hook: snapshot for the session binding is not a profile: %s", exc)
+        return None
+    if profile.content_hash() != content_hash:
+        logger.warning("claude_code_hook: rebuilt profile does not reproduce the bound content hash")
+        return None
+    fingerprint = profile.fingerprint()
+    if fingerprint != entry["profile_fingerprint"]:
+        logger.warning("claude_code_hook: rebuilt profile does not reproduce the bound fingerprint")
+        return None
+    return _BoundProfile(profile, resolution, binding, fingerprint, content_hash, recovered_from)
+
+
+def _fresh_fingerprint(fresh: ResolvedProfile) -> Optional[str]:
+    return fresh.profile.fingerprint() if fresh.profile is not None else None
+
+
+def _fresh_agrees(fresh: ResolvedProfile, registration: Registration) -> bool:
+    """Agreement rule for silent rematerialization (CP1-D §6, corrected).
+
+    Fingerprint must match; when the registration recorded provenance
+    (v0.3.2+ bound/degraded), resolution and binding must match too.
+    Pre-v0.3.2 registrations and default/none registrations carry no
+    provenance and compare on fingerprint alone.
+    """
+    if _fresh_fingerprint(fresh) != registration.profile_fingerprint:
+        return False
+    if registration.has_provenance:
+        return (
+            fresh.source == registration.profile_resolution
+            and fresh.binding == registration.profile_binding
+        )
+    return True
+
+
+def _bound_agrees(bound: _BoundProfile, registration: Registration) -> bool:
+    if bound.fingerprint != registration.profile_fingerprint:
+        return False
+    if registration.has_provenance:
+        return (
+            bound.resolution == registration.profile_resolution
+            and bound.binding == registration.profile_binding
+        )
+    return True
+
+
+def _recover_binding(sink_path: Path, session_id: str, agent_id: str) -> _BoundProfile:
+    """Binding missing, invalid, corrupt, or disagreeing: resolve fresh and
+    decide against the trace's registration. Always returns a usable result
+    (fail-open)."""
+    fresh = resolve_profile(agent_id=agent_id)
+    registration = read_registration(sink_path, session_id)
+    if not registration.found:
+        # First process for this session, or a crash before registration.
+        return _establish_binding(sink_path, session_id, fresh, recovered_from=None)
+    if _fresh_agrees(fresh, registration):
+        logger.info(
+            "claude_code_hook: session %s binding re-materialized (fresh "
+            "resolution agrees with the registration)",
+            session_id[:12],
+        )
+        return _establish_binding(
+            sink_path, session_id, fresh, recovered_from=_RECOVERED_REMATERIALIZED
+        )
+    logger.warning(
+        "claude_code_hook: session %s re-resolved: registration "
+        "(fingerprint=%s, resolution=%s, binding=%s) disagrees with fresh "
+        "resolution (fingerprint=%s, resolution=%s, binding=%s); continuing "
+        "on the fresh profile",
+        session_id[:12],
+        registration.profile_fingerprint,
+        registration.profile_resolution,
+        registration.profile_binding,
+        _fresh_fingerprint(fresh),
+        fresh.source,
+        fresh.binding,
+    )
+    return _establish_binding(sink_path, session_id, fresh, recovered_from=_RECOVERED_RERESOLVE)
+
+
+def _establish_binding(
+    sink_path: Path,
+    session_id: str,
+    fresh: ResolvedProfile,
+    *,
+    recovered_from: Optional[str],
+) -> _BoundProfile:
+    """Materialize a verified snapshot, then record the binding.
+
+    Never records a binding that references an unverified snapshot: if the
+    snapshot cannot be materialized and verified, this process governs from
+    the fresh resolution with NO durable binding, and a later process
+    retries.
+    """
+    if fresh.profile is None:
+        record_session_binding(
+            sink_path,
+            session_id,
+            build_binding_entry(
+                resolution=fresh.source,
+                binding=fresh.binding,
+                profile_content_hash=None,
+                source_path=None,
+                bound_by=_BOUND_BY,
+                recovered_from=recovered_from,
+            ),
+        )
+        return _BoundProfile(None, fresh.source, fresh.binding, None, None, recovered_from)
+
+    canonical = fresh.profile.canonical_bytes()
+    content_hash = content_hash_of(canonical)
+    fingerprint = fresh.profile.fingerprint()
+    snapshot = ensure_profile_snapshot(profiles_dir_for(sink_path), canonical)
+    if snapshot is None:
+        logger.warning(
+            "claude_code_hook: session %s has no verified profile snapshot; "
+            "governing this process from the fresh resolution without a "
+            "durable binding (a later process retries)",
+            session_id[:12],
+        )
+        return _BoundProfile(
+            fresh.profile, fresh.source, fresh.binding, fingerprint, content_hash, recovered_from
+        )
+    source_path = fresh.profile.source_path
+    record_session_binding(
+        sink_path,
+        session_id,
+        build_binding_entry(
+            resolution=fresh.source,
+            binding=fresh.binding,
+            profile_content_hash=content_hash,
+            source_path=str(source_path) if source_path is not None else "",
+            bound_by=_BOUND_BY,
+            recovered_from=recovered_from,
+        ),
+    )
+    return _BoundProfile(
+        fresh.profile, fresh.source, fresh.binding, fingerprint, content_hash, recovered_from
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -545,13 +842,17 @@ class ClaudeCodeGovernanceHook:
             session_manager = SessionManager()
             cache = InProcessCache()
             sink = SinkWriter(FileSink(str(sink_path)))
-            profile = GovernanceProfile.from_default_path_or_none()
+            # v0.3.2: the declaration is appended under the SAME governing
+            # profile the session was bound to at its first event.
+            bound = _establish_or_rehydrate_binding(
+                sink_path, session_id, agent_id, resumed
+            )
             session_manager.session_start(
                 session_id=session_id,
                 agent_id=agent_id,
                 initial_sequence=resumed.last_sequence,
                 initial_last_event_id=resumed.last_event_id,
-                profile=profile,
+                profile=bound.profile,
             )
             cache.init_session(session_id)
             builder = EventBuilder(
@@ -560,6 +861,8 @@ class ClaudeCodeGovernanceHook:
                 agent_id=agent_id,
                 session_id=session_id,
                 deployment_mode=deployment_mode,
+                profile_resolution=bound.resolution,
+                profile_binding=bound.binding,
             )
             event = builder.build_intent_declared(
                 stated_objective=stated_objective,
@@ -623,16 +926,19 @@ class ClaudeCodeGovernanceHook:
             initial_sequence = resumed.last_sequence if resumed else 0
             initial_last_event_id = resumed.last_event_id if resumed else None
 
-            # v0.2.5: load operator-authored governance profile if
-            # present. None when no file exists — keeps the v0.2.4
-            # code path for resumption-based hook sessions.
-            profile = GovernanceProfile.from_default_path_or_none()
+            # v0.3.2: resolve the governing profile once per session and keep
+            # it sticky across hook processes (binding + snapshot beside the
+            # sink). None when the session resolves to no profile, which
+            # keeps the pre-profile code path exactly as before.
+            bound = _establish_or_rehydrate_binding(
+                sink_path, ctx.session_id, ctx.agent_id, resumed
+            )
             session_manager.session_start(
                 session_id=ctx.session_id,
                 agent_id=ctx.agent_id,
                 initial_sequence=initial_sequence,
                 initial_last_event_id=initial_last_event_id,
-                profile=profile,
+                profile=bound.profile,
             )
             cache.init_session(ctx.session_id)
 
@@ -660,6 +966,10 @@ class ClaudeCodeGovernanceHook:
                 agent_id=ctx.agent_id,
                 session_id=ctx.session_id,
                 deployment_mode=ctx.deployment_mode,
+                # v0.3.2: registration provenance (bound/degraded only;
+                # the builder omits it for default/none).
+                profile_resolution=bound.resolution,
+                profile_binding=bound.binding,
             )
 
             is_first_event = resumed is None
@@ -813,7 +1123,10 @@ class ClaudeCodeGovernanceHook:
     def _emit_pre_tool(
         self, builder: EventBuilder, sink: SinkWriter, ctx: _HookContext
     ) -> None:
-        op_type, target_system = _infer_tool_mapping(ctx.tool_name)
+        op_type, _legacy_target = _infer_tool_mapping(ctx.tool_name)
+        # v0.3.2: Bash calls carry the semantic classification and derive
+        # the richer target from it; operation_type stays EXECUTE.
+        classification, target_system = _classify_bash_call(ctx)
 
         scope_event = builder.build_scope_asserted(
             tool_id=ctx.tool_name,
@@ -822,6 +1135,7 @@ class ClaudeCodeGovernanceHook:
             operation_type=op_type,
             authorization_claim=None,
             tool_use_id=ctx.tool_use_id,
+            operation_classification=classification,
         )
         if scope_event:
             sink.write(scope_event, ctx.session_id)
@@ -867,7 +1181,9 @@ class ClaudeCodeGovernanceHook:
     def _emit_post_tool(
         self, builder: EventBuilder, sink: SinkWriter, ctx: _HookContext
     ) -> None:
-        _op_type, target_system = _infer_tool_mapping(ctx.tool_name)
+        # v0.3.2: the post-call snapshot's provenance uses the same
+        # classification-derived target as the pre-call pair.
+        _classification, target_system = _classify_bash_call(ctx)
         ctx_event = builder.build_context_snapshot(
             data_classifications=[],
             classification_source=ClassificationSource.unclassified,

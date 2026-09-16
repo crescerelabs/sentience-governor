@@ -117,8 +117,22 @@ class TestSingleInvocation:
         ]
         scope = events[2]
         assert scope["payload"]["tool_id"] == "Bash"
+        # v0.3.2: a complete single-domain command derives the richer
+        # compatibility target; operation_type stays EXECUTE.
+        assert scope["payload"]["target_system"] == "shell/filesystem"
+        assert scope["payload"]["operation_type"] == OperationType.EXECUTE.value
+        assert scope["payload"]["operation_classification"]["complete"] is True
+
+    def test_pre_bash_unknown_command_keeps_plain_shell_target(self, sink_path: Path):
+        """v0.3.2: an unknown executable keeps the legacy `shell` target and
+        carries an explicit unknown classification."""
+        _run(_pre_payload("Bash", command="./deploy.sh"), sink_path)
+        scope = _read_events(sink_path)[2]
         assert scope["payload"]["target_system"] == "shell"
         assert scope["payload"]["operation_type"] == OperationType.EXECUTE.value
+        oc = scope["payload"]["operation_classification"]
+        assert oc["complete"] is False
+        assert oc["segments"][0]["effects"] == [{"domain": "unknown", "action": "unknown", "destructive": None}]
 
 
 # ---------------------------------------------------------------------------

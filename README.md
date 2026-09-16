@@ -37,21 +37,32 @@ happen. For real output, see [See it work](#see-it-work) below.*
 
 ## What's new
 
-**0.3.1.2** gives the review context when you ask for it inside Claude Code.
-The summary now names every session it reviewed, not just the ones that stood
-out, and says for each whether a finding was retained, was not, or cannot be
-established because the display was truncated. Cross-project findings say how
-many distinct files the writes touched, not just how many write operations
-there were, which is the difference between many edits to one file and one edit
-to many. Local and read-only, as before.
+**0.3.2** answers three questions from the trace: which policy governs this
+session, what the agent is actually doing, and whether that action triggers
+the governing policy. An optional `~/.sentience/resolution.yaml` binds agents
+to profiles by `agent_id`, first match wins, resolved once per session and
+recorded on the session's registration; the Claude Code hook keeps the bound
+profile sticky across its per-call processes, so editing a profile mid-session
+no longer changes that session, and `sentience profile resolve` shows what
+happened. Every Claude Code `Bash` event now carries a deterministic reading
+of what the command does: segments and effects with a domain, an action and a
+three-state `destructive`, with anything unreadable marked `unknown` rather
+than guessed. Profiles can flag those effects with `high_consequence.operations`
+rules that match one effect at a time, so `rm -rf /tmp && aws ec2
+describe-instances` never becomes a destructive cloud match. Nothing is
+blocked, `operation_type` is unchanged, and existing profiles keep their
+fingerprint.
 
 **Pydantic AI support ships as its own distribution.**
-[`pydantic-ai-governor`](https://github.com/crescerelabs/sentience-governor/tree/main/integrations/pydantic-ai-governor)
-0.1.0 adds a Pydantic AI capability: attach it to an agent and each run opens
+[`pydantic-ai-governor`](https://pypi.org/project/pydantic-ai-governor/)
+0.1.0 ([source](https://github.com/crescerelabs/sentience-governor/tree/main/integrations/pydantic-ai-governor))
+adds a Pydantic AI capability: attach it to an agent and each run opens
 its own Sentience Governor session, recording what the agent dispatched
 against the declaration state recorded before the run, with measured per-turn
 token usage. It installs separately, versions separately, and Sentience
-Governor itself takes on no Pydantic AI dependency.
+Governor itself takes on no Pydantic AI dependency. It pins core below 0.3.2;
+a 0.1.1 companion release adopting per-agent policy resolution follows
+separately.
 
 Earlier releases, in full, are in the
 [changelog](https://github.com/crescerelabs/sentience-governor/blob/main/CHANGELOG.md).
@@ -401,7 +412,9 @@ sentience demo declare-intent     # the POL-001 before/after flip
 | **Full docs** | [docs/index.md](https://github.com/crescerelabs/sentience-governor/blob/main/docs/index.md) |
 | **Changelog** | [CHANGELOG.md](https://github.com/crescerelabs/sentience-governor/blob/main/CHANGELOG.md) |
 | **Examples** | [examples/](https://github.com/crescerelabs/sentience-governor/tree/main/examples/) |
-| **Governor's Log** | [getsentience.ai/governor-log](https://getsentience.ai/governor-log) |
+| **Governor's Log** | [getsentience.ai/governor-log](https://getsentience.ai/governor-log), the product-wide engineering publication |
+| **Product site** | [getsentience.ai](https://getsentience.ai) |
+| **Pydantic AI integration** | [`pydantic-ai-governor` on PyPI](https://pypi.org/project/pydantic-ai-governor/) |
 
 ---
 

@@ -43,6 +43,7 @@ from typing import Any, Dict, List, Optional, Union
 from sentience_governor.cache.cache import InProcessCache
 from sentience_governor.event_builder.builder import EventBuilder
 from sentience_governor.profile import GovernanceProfile
+from sentience_governor.profile.resolver import resolve_profile
 from sentience_governor.schema.events import (
     ClassificationSource,
     DeploymentMode,
@@ -497,9 +498,11 @@ class SentienceCallbackHandler:
         ids.
         """
         session_id = str(uuid.uuid4())
-        # v0.2.5: load operator-authored governance profile if present.
-        # See mcp.py._start for full rationale.
-        profile = GovernanceProfile.from_default_path_or_none()
+        # v0.3.2: resolve the governing profile for this agent; sticky by
+        # construction (one immutable object per root session). See
+        # mcp.py._start for the rationale.
+        resolved = resolve_profile(agent_id=self._agent_id)
+        profile: Optional[GovernanceProfile] = resolved.profile
         self._sm.session_start(
             session_id=session_id,
             agent_id=self._agent_id,
@@ -517,6 +520,8 @@ class SentienceCallbackHandler:
             agent_id=self._agent_id,
             session_id=session_id,
             deployment_mode=self._deployment_mode,
+            profile_resolution=resolved.source,
+            profile_binding=resolved.binding,
         )
         root = _RootState(session_id=session_id, builder=builder)
         if key is _LEGACY_ROOT:

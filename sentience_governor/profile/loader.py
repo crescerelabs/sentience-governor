@@ -40,12 +40,17 @@ from sentience_governor.profile.schema import (
     DEFAULT_TASK_BOUNDARY,
     KNOWN_TOP_LEVEL_KEYS,
     ON_MATCH_FLAG,
+    OPERATION_ACTIONS,
+    OPERATION_DOMAINS,
+    OPERATION_RULE_KEYS,
+    OPTIONAL_ADDITIVE_FIELDS,
     RESERVED_ON_MATCH_VALUES,
     RESERVED_TOP_LEVEL_KEYS,
     SCHEMA_VERSION,
     SECTION_HIGH_CONSEQUENCE,
     SECTION_SESSION_INTENT,
     SECTION_TASK_BOUNDARY,
+    SET_VALUED_RULE_PREDICATES,
     VALID_DEMAND_AT_VALUES,
     VALID_ON_MATCH_VALUES,
     VALID_SIGNAL_VALUES,
@@ -53,10 +58,16 @@ from sentience_governor.profile.schema import (
 )
 
 # ---------------------------------------------------------------------------
-# Default file location
+# Default file locations
 # ---------------------------------------------------------------------------
 
 DEFAULT_PROFILE_PATH = Path.home() / ".sentience" / "profile.yaml"
+
+# v0.3.2: optional per-agent resolution file (see profile/resolver.py).
+# Deliberately a separate file from profile.yaml: bindings for OTHER
+# agents must not change the fingerprint of the profile that governs
+# THIS session.
+DEFAULT_RESOLUTION_PATH = Path.home() / ".sentience" / "resolution.yaml"
 
 # Fingerprint length used by the runtime when populating
 # profile_fingerprint on event envelopes (CP3 will use this). 12
@@ -137,9 +148,14 @@ _FIELD_COMMENTS: Dict[tuple, str] = {
         "Tool names that should always be surfaced (e.g. 'db.delete'). "
         "Empty list = none."
     ),
+    (SECTION_HIGH_CONSEQUENCE, "operations"): (
+        "Rules over what a shell command does, e.g. "
+        "{domain: cloud_infrastructure, destructive: true}. "
+        "Empty list = none. Order does not matter."
+    ),
     (SECTION_HIGH_CONSEQUENCE, "on_match"): (
-        "What to do when a high-consequence tool is used. 'flag' = "
-        "surface it."
+        "What to do when a high-consequence tool or operation is used. "
+        "'flag' = surface it."
     ),
 }
 
@@ -418,29 +434,54 @@ class GovernanceProfile:
     # Content hash (deterministic across whitespace/comment/order)
     # ------------------------------------------------------------------
 
+    def canonical_bytes(self) -> bytes:
+        """Return the exact bytes ``content_hash`` hashes.
+
+        v0.3.2: this is the one canonical representation of the profile's
+        effective governance posture. The full content hash, the short
+        fingerprint, and (from a later checkpoint) the immutable snapshot
+        files are all derived from these bytes; there is no second
+        hashing algorithm or second serialization.
+        """
+        return json.dumps(
+            canonical_profile_data(self._data),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode("utf-8")
+
     def content_hash(self) -> str:
-        """Return SHA256 of the profile's canonical form, hex-encoded.
+        """Return the full 64-hex SHA-256 of the profile's canonical form.
 
         The hash is deterministic across:
         - whitespace / comment differences in the source YAML
         - key-ordering differences within mappings
-        - sequence-ordering differences are NOT normalized
-          (signals/tools are operator-meaningful)
+        - sequence-ordering differences are NOT normalized for the
+          historical ordered fields (signals/tools are operator-meaningful)
 
-        Used as the integrity primitive: the same profile content
-        always hashes to the same value; modified content always
-        hashes differently.
+        v0.3.2 additions, applied by :func:`canonical_profile_data`:
+        - registered optional-additive fields (``high_consequence.operations``)
+          are omitted when absent-equivalent, so an unchanged legacy
+          profile keeps its historical hash when the runtime gains a new
+          optional capability;
+        - ``high_consequence.operations`` is an unordered, deduplicated set
+          of rules for identity, with set-valued predicates sorted, because
+          rules are evaluated existentially and their order carries no
+          governance meaning.
+
+        Used as the integrity primitive: the same effective posture
+        always hashes to the same value; a changed posture always hashes
+        differently.
         """
-        canonical = json.dumps(
-            self._data,
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=True,
-        )
-        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        return hashlib.sha256(self.canonical_bytes()).hexdigest()
 
     def fingerprint(self) -> str:
-        """Return the short fingerprint used on event envelopes."""
+        """Return the short fingerprint used on event envelopes.
+
+        The first :data:`FINGERPRINT_LENGTH` (12) characters of
+        :meth:`content_hash`. Public evidence identifier only; storage
+        identity and integrity checks use the full hash.
+        """
         return self.content_hash()[:FINGERPRINT_LENGTH]
 
     # ------------------------------------------------------------------
@@ -582,6 +623,12 @@ class GovernanceProfile:
                         f"'{SECTION_HIGH_CONSEQUENCE}.tools' must be a "
                         f"list; got {type(tools).__name__}."
                     )
+                self._validate_operations(
+                    hc.get("operations"),
+                    errors=errors,
+                    warnings=warnings,
+                    strict=strict,
+                )
                 self._validate_on_match(
                     hc.get("on_match"),
                     section_name=SECTION_HIGH_CONSEQUENCE,
@@ -597,6 +644,82 @@ class GovernanceProfile:
             warnings=warnings,
             strict=strict,
         )
+
+    @staticmethod
+    def _validate_operations(
+        value: Any,
+        *,
+        errors: List[str],
+        warnings: List[str],
+        strict: bool,
+    ) -> None:
+        """Validate ``high_consequence.operations`` (v0.3.2).
+
+        Shape: a list of rule mappings over ``domain`` / ``action`` /
+        ``destructive``. ``domain`` and ``action`` take a string or a list
+        of strings from the vocabularies in :mod:`schema`; ``destructive``
+        takes ``true`` or ``false``. A rule with no predicates would match
+        every classified operation and is warned about.
+
+        Lenient by default: a malformed rule or an unknown vocabulary
+        value is a warning (an error in strict mode), and the runtime
+        evaluator, when it lands, skips such a rule rather than crashing.
+        A non-list ``operations`` value is always an error, matching the
+        existing ``tools`` rule.
+        """
+        field = f"'{SECTION_HIGH_CONSEQUENCE}.operations'"
+        if value is None:
+            return  # absent-equivalent
+        if not isinstance(value, list):
+            errors.append(f"{field} must be a list; got {type(value).__name__}.")
+            return
+
+        def _report(msg: str) -> None:
+            if strict:
+                errors.append(msg)
+            else:
+                warnings.append(msg)
+
+        for index, rule in enumerate(value):
+            where = f"{field}[{index}]"
+            if not isinstance(rule, dict):
+                _report(
+                    f"{where} must be a mapping; got {type(rule).__name__}. "
+                    "The rule is skipped at runtime."
+                )
+                continue
+            if not rule:
+                warnings.append(
+                    f"{where} specifies no predicates and would match every "
+                    "classified operation."
+                )
+            for key in rule:
+                if key not in OPERATION_RULE_KEYS:
+                    _report(
+                        f"{where} has unknown key '{key}'. Recognized keys: "
+                        + ", ".join(sorted(OPERATION_RULE_KEYS))
+                        + ". The rule is skipped at runtime."
+                    )
+            for key, vocabulary, label in (
+                ("domain", OPERATION_DOMAINS, "domains"),
+                ("action", OPERATION_ACTIONS, "actions"),
+            ):
+                if key not in rule:
+                    continue
+                raw = rule[key]
+                members = raw if isinstance(raw, list) else [raw]
+                for member in members:
+                    if not isinstance(member, str) or member not in vocabulary:
+                        _report(
+                            f"{where}.{key} value {member!r} is not recognized. "
+                            f"Valid {label}: " + ", ".join(sorted(vocabulary))
+                            + ". The rule is skipped at runtime."
+                        )
+            if "destructive" in rule and not isinstance(rule["destructive"], bool):
+                _report(
+                    f"{where}.destructive must be true or false; got "
+                    f"{rule['destructive']!r}. The rule is skipped at runtime."
+                )
 
     @staticmethod
     def _validate_on_match(
@@ -671,6 +794,69 @@ class GovernanceProfile:
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+
+def canonical_profile_data(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the canonical, hashable form of merged profile data (v0.3.2).
+
+    Two transformations, and only these:
+
+    1. **Omission-aware fields.** Each ``(section, key)`` registered in
+       :data:`OPTIONAL_ADDITIVE_FIELDS` is removed when its value is
+       ``None`` or equals its absent-equivalent. This is what lets a
+       legacy profile keep its historical fingerprint after the runtime
+       adds a new optional field to the defaults. Fields that are not
+       registered are hashed exactly as they always have been.
+    2. **Unordered operation rules.** ``high_consequence.operations`` is
+       evaluated existentially (any matching rule raises the same flag),
+       so for identity it is an unordered set: each rule is canonicalized
+       (set-valued predicates ``domain`` / ``action`` sorted and
+       deduplicated; other keys untouched), identical rules are
+       deduplicated, and the rules are ordered by their canonical
+       serialization. The original YAML order is preserved in the
+       profile itself for readability; only identity treats it as a set.
+
+    The historical ordered fields (``task_boundary.signals``,
+    ``high_consequence.tools``) are not touched: their order still
+    changes the hash, as it always has.
+
+    Pure: returns a fresh structure and never mutates ``data``. Idempotent:
+    canonicalizing a canonical form yields the same bytes, which the
+    snapshot machinery of a later checkpoint relies on.
+    """
+    canonical: Dict[str, Any] = json.loads(json.dumps(data))
+
+    for (section, key), absent in OPTIONAL_ADDITIVE_FIELDS.items():
+        holder = canonical.get(section)
+        if isinstance(holder, dict) and key in holder:
+            if holder[key] is None or holder[key] == absent:
+                del holder[key]
+
+    hc = canonical.get(SECTION_HIGH_CONSEQUENCE)
+    if isinstance(hc, dict) and isinstance(hc.get("operations"), list):
+        hc["operations"] = _canonical_operation_rules(hc["operations"])
+
+    return canonical
+
+
+def _canonical_operation_rules(rules: List[Any]) -> List[Any]:
+    """Canonicalize an ``operations`` list as an unordered, deduplicated set."""
+    serialized = set()
+    for rule in rules:
+        if isinstance(rule, dict):
+            rule = dict(rule)
+            for predicate in SET_VALUED_RULE_PREDICATES:
+                value = rule.get(predicate)
+                if isinstance(value, list):
+                    # Members are strings in a valid rule; sort by their
+                    # JSON serialization so a malformed mixed-type list is
+                    # still ordered deterministically rather than raising.
+                    rule[predicate] = [
+                        json.loads(m)
+                        for m in sorted({json.dumps(v, sort_keys=True) for v in value})
+                    ]
+        serialized.add(json.dumps(rule, sort_keys=True, separators=(",", ":")))
+    return [json.loads(s) for s in sorted(serialized)]
 
 
 def _merge_with_defaults(loaded: Dict[str, Any]) -> Dict[str, Any]:

@@ -54,6 +54,11 @@ def profile_view_payload() -> Dict[str, Any]:
     Returns the declared profile plus provenance so a consumer reads the
     *declared* posture rather than inferring one (plan §3.3 / §3.4). When no
     profile file exists, returns the defaults with ``from_file: false``.
+
+    This is the machine DEFAULT profile (``~/.sentience/profile.yaml``). Since
+    v0.3.2 a given agent may resolve to a different profile through
+    ``~/.sentience/resolution.yaml``; this view does not apply that
+    resolution.
     """
     profile = GovernanceProfile.from_default_path_or_none()
     from_file = profile is not None
@@ -752,7 +757,12 @@ def build_server() -> Any:
         writes nothing if the live session cannot be identified with
         confidence. `scope` is required and must cover the targets you will
         act on (e.g. ["filesystem"], ["shell"], ["web"]); an empty or
-        mismatched scope still trips a scope-intent mismatch.
+        mismatched scope still trips a scope-intent mismatch. A Bash call's
+        target is `shell/<domain>` when its classification is complete and
+        single-domain (`shell/version_control` for `git status`) and plain
+        `shell` otherwise, so `["shell"]` covers every Bash call while a
+        narrower hint such as `["shell/version_control"]` covers only
+        commands the classifier read as that one domain.
         """
         return declare_intent_payload(objective, scope)
 

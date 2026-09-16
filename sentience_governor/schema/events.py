@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any, List, Optional, Union
+from typing import Any, List, Literal, Optional, Union
 
 from pydantic import BaseModel, Field, model_serializer
 
@@ -177,10 +177,26 @@ class AgentRegisteredPayload(BaseModel):
     profile_loaded: Optional[bool] = None
     profile_schema_version: Optional[int] = None
 
+    # v0.3.2 — per-session policy resolution provenance. Recorded only
+    # when the session resolved through ~/.sentience/resolution.yaml:
+    # ``profile_resolution`` is "bound" or "degraded" and
+    # ``profile_binding`` is the matched agent_id pattern. Sessions on
+    # the machine default or on no profile omit both, so their
+    # registrations are byte-identical to v0.3.1.2. The full content
+    # hash is never recorded here; the envelope carries the 12-hex
+    # fingerprint only.
+    profile_resolution: Optional[str] = None
+    profile_binding: Optional[str] = None
+
     @model_serializer(mode="wrap")
     def serialize_with_profile_omission(self, default_handler):
         raw = default_handler(self)
-        for field in ("profile_loaded", "profile_schema_version"):
+        for field in (
+            "profile_loaded",
+            "profile_schema_version",
+            "profile_resolution",
+            "profile_binding",
+        ):
             if raw.get(field) is None:
                 raw.pop(field, None)
         return raw
@@ -192,6 +208,69 @@ class IntentDeclaredPayload(BaseModel):
     intent_confidence: IntentConfidence
     authorization_claim: Optional[str] = None
     session_scope_hint: List[str] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# v0.3.2 — semantic shell classification (multi-effect, per segment)
+#
+# A Bash call is represented as ordered segments, each carrying zero, one or
+# many ClassifiedEffect triples. Every triple corresponds to one effect the
+# classifier asserted for one segment; nothing is aggregated across effects
+# or segments (there is deliberately no top-level domain/action). Vocabularies
+# are closed. `destructive` is tri-state: True only with strong syntactic
+# evidence of discarding, False when the rules establish non-destructive,
+# None when it depends on unseen state. The object is optional and
+# None-omitted on ScopeAssertedPayload; `operation_type` is unchanged.
+# ---------------------------------------------------------------------------
+
+OPERATION_DOMAINS = (
+    "filesystem",
+    "version_control",
+    "packages",
+    "network",
+    "cloud_infrastructure",
+    "process",
+    "unknown",
+)
+OPERATION_ACTIONS = ("read", "create", "modify", "delete", "execute", "unknown")
+
+OperationDomain = Literal[
+    "filesystem",
+    "version_control",
+    "packages",
+    "network",
+    "cloud_infrastructure",
+    "process",
+    "unknown",
+]
+OperationAction = Literal["read", "create", "modify", "delete", "execute", "unknown"]
+
+
+class ClassifiedEffect(BaseModel):
+    domain: OperationDomain
+    action: OperationAction
+    destructive: Optional[bool] = None
+
+
+class ClassifiedSegment(BaseModel):
+    executable: str
+    subcommand: Optional[str] = None
+    effects: List[ClassifiedEffect] = Field(default_factory=list)
+
+    @model_serializer(mode="wrap")
+    def _omit_none_subcommand(self, default_handler):
+        raw = default_handler(self)
+        if raw.get("subcommand") is None:
+            raw.pop("subcommand", None)
+        return raw
+
+
+class OperationClassification(BaseModel):
+    classifier: str
+    classifier_version: int
+    complete: bool
+    destructive: Optional[bool] = None
+    segments: List[ClassifiedSegment] = Field(default_factory=list)
 
 
 class ScopeAssertedPayload(BaseModel):
@@ -207,11 +286,19 @@ class ScopeAssertedPayload(BaseModel):
     # it None and the field never appears, so existing traces are unchanged.
     tool_use_id: Optional[str] = None
 
+    # v0.3.2 — semantic classification of a shell command (Bash calls only,
+    # wired by the Claude Code hook in a later checkpoint). Optional and
+    # None-omitted: absent means this path does not classify; present with
+    # unknown effects means the classifier ran and could not. The legacy
+    # `operation_type` and `target_system` fields are unchanged.
+    operation_classification: Optional[OperationClassification] = None
+
     @model_serializer(mode="wrap")
     def _omit_none_tool_use_id(self, default_handler):
         raw = default_handler(self)
-        if raw.get("tool_use_id") is None:
-            raw.pop("tool_use_id", None)
+        for field in ("tool_use_id", "operation_classification"):
+            if raw.get(field) is None:
+                raw.pop(field, None)
         return raw
 
 

@@ -1,0 +1,8 @@
+schema_version: 1
+session_intent:
+  required: true
+  demand_at: never
+high_consequence:
+  tools: ["mcp__.*__delete.*"]
+extends: base
+custom_note: kept-by-loader

@@ -48,13 +48,17 @@ is pulled.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
+import re
+import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, Iterator, Optional
+from typing import Any, Dict, Iterable, Iterator, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -430,3 +434,338 @@ def file_size(sink_path: Path) -> int:
         return sink_path.stat().st_size
     except OSError:
         return 0
+
+
+# ---------------------------------------------------------------------------
+# v0.3.2 — sticky session binding: content-addressed profile snapshots and
+# the per-session binding bucket.
+# ---------------------------------------------------------------------------
+#
+# The Claude Code hook runs one process per invocation. Per-session policy
+# resolution (profile/resolver.py) is a pure function of configuration, so a
+# configuration edit mid-session would silently change which policy governs
+# the session's later events. To keep a session bound to the policy CONTENT
+# it started under, the first process materializes the resolved profile's
+# canonical bytes into an immutable, content-addressed snapshot file beside
+# the sink and records a per-session binding in the sidecar; every later
+# process rebuilds the identical GovernanceProfile from those two artifacts.
+#
+# Invariants:
+#   * a snapshot file's name is the full SHA-256 of its bytes, and the bytes
+#     are exactly the profile's canonical bytes (loader.canonical_bytes);
+#   * ensure_profile_snapshot returns a path ONLY after verifying the file's
+#     bytes hash to the expected value, so no durable binding ever references
+#     an unverified snapshot;
+#   * a file at the hash-derived name whose bytes do not hash to that name is
+#     a corrupted artifact, not a valid snapshot; replacing it is repair, not
+#     mutation of an immutable snapshot;
+#   * a valid snapshot is never rewritten and never deleted by the runtime;
+#   * the sidecar bucket is read-modify-write like the emitted-turns bucket,
+#     so every existing sidecar writer preserves it and it preserves theirs;
+#   * nothing here raises into the hook; every failure degrades to "no
+#     verified snapshot" / "no usable binding" and is logged once.
+
+_SESSION_BINDING_KEY = "__sentience_session_binding__"
+SESSION_BINDING_SCHEMA = 1
+PROFILES_DIR_NAME = "profiles"
+
+BINDING_RESOLUTIONS = frozenset(["bound", "degraded", "default", "none"])
+BINDING_RECOVERY_MARKERS = frozenset(["rematerialized", "reresolve"])
+
+_HEX64 = re.compile(r"^[0-9a-f]{64}$")
+
+
+def profiles_dir_for(sink_path: Path) -> Path:
+    """Return the snapshot directory beside ``sink_path``: ``<parent>/profiles``.
+
+    Derived from the sink the same way the sidecar is, so per-session mode,
+    shared-file mode and the /tmp fallback all get one rule.
+    """
+    return Path(sink_path).parent / PROFILES_DIR_NAME
+
+
+def snapshot_relative_path(content_hash: str) -> str:
+    """The binding's ``snapshot`` value for ``content_hash``: ``profiles/<hash>.json``."""
+    return f"{PROFILES_DIR_NAME}/{content_hash}.json"
+
+
+def content_hash_of(canonical: bytes) -> str:
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _verify_snapshot_file(target: Path, expected_hash: str) -> bool:
+    """True iff ``target`` exists and its bytes hash to ``expected_hash``."""
+    try:
+        data = target.read_bytes()
+    except OSError:
+        return False
+    return content_hash_of(data) == expected_hash
+
+
+def _write_snapshot_atomic(target: Path, canonical: bytes) -> None:
+    """temp (unique) → write → fsync → os.replace. Raises OSError on failure."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{target.stem}.", suffix=".tmp", dir=str(target.parent)
+    )
+    try:
+        try:
+            os.write(fd, canonical)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(tmp_name, str(target))
+    except OSError:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+
+
+def ensure_profile_snapshot(profiles_dir: Path, canonical: bytes) -> Optional[Path]:
+    """Materialize ``canonical`` as a verified, content-addressed snapshot.
+
+    Returns the snapshot path ONLY if, at the moment of return, the file's
+    bytes hash to ``sha256(canonical)``. A caller may write a session
+    binding only against a returned path.
+
+    * target absent: written atomically, re-read, verified;
+    * target present and verifying: left untouched (immutability);
+    * target present and NOT verifying: a corrupted artifact occupying the
+      hash-derived name; repaired atomically with the canonical bytes, then
+      verified;
+    * any failure: ``None`` (logged once); the caller must not bind.
+    """
+    expected = content_hash_of(canonical)
+    target = Path(profiles_dir) / f"{expected}.json"
+    try:
+        if target.exists():
+            if _verify_snapshot_file(target, expected):
+                return target
+            logger.warning(
+                "profile snapshot %s does not hash to its name; repairing the "
+                "corrupted artifact in place",
+                target.name,
+            )
+        _write_snapshot_atomic(target, canonical)
+        if _verify_snapshot_file(target, expected):
+            return target
+        logger.warning(
+            "profile snapshot %s failed verification after write; no binding "
+            "will reference it",
+            target.name,
+        )
+        return None
+    except OSError as exc:
+        logger.warning(
+            "profile snapshot %s could not be materialized: %s; no binding "
+            "will reference it",
+            target.name,
+            exc,
+        )
+        return None
+
+
+def read_profile_snapshot(path: Path, expected_hash: str) -> Optional[bytes]:
+    """Return the snapshot bytes iff they hash to ``expected_hash`` AND the
+    file is named by that hash. ``None`` (logged) on any mismatch or error.
+
+    This is the full-hash integrity decision. It is made before any short
+    fingerprint is computed or compared.
+    """
+    path = Path(path)
+    if path.stem != expected_hash:
+        logger.warning("profile snapshot path %s is not named by the expected hash", path.name)
+        return None
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        logger.warning("profile snapshot %s unreadable: %s", path.name, exc)
+        return None
+    if content_hash_of(data) != expected_hash:
+        logger.warning(
+            "profile snapshot %s is corrupted: bytes do not hash to the "
+            "recorded profile_content_hash",
+            path.name,
+        )
+        return None
+    return data
+
+
+def _valid_binding_entry(entry: Any) -> bool:
+    """Validate a binding entry per the CP1-D schema; malformed → unusable."""
+    if not isinstance(entry, dict):
+        return False
+    if entry.get("schema") != SESSION_BINDING_SCHEMA:
+        return False
+    resolution = entry.get("resolution")
+    if resolution not in BINDING_RESOLUTIONS:
+        return False
+    fp = entry.get("profile_fingerprint")
+    ch = entry.get("profile_content_hash")
+    snap = entry.get("snapshot")
+    src = entry.get("source_path")
+    recovered = entry.get("recovered_from")
+    if recovered is not None and recovered not in BINDING_RECOVERY_MARKERS:
+        return False
+    if fp is None and ch is None and snap is None and src is None:
+        # Bound to no profile: only degraded (no default) or none may say so.
+        return resolution in ("degraded", "none")
+    if not (isinstance(ch, str) and _HEX64.match(ch)):
+        return False
+    if not (isinstance(fp, str) and fp == ch[:12]):
+        return False
+    if not (isinstance(snap, str) and snap == snapshot_relative_path(ch)):
+        return False
+    if not (isinstance(src, str) and src):
+        return False
+    return True
+
+
+def read_session_binding(sink_path: Path, session_id: str) -> Optional[Dict[str, Any]]:
+    """Return the validated binding entry for ``session_id``, or ``None``.
+
+    Missing, unreadable, corrupt or schema-invalid entries are all
+    ``None``; an invalid entry is logged by session id only. Call under
+    ``sink_lock``.
+    """
+    index = _read_sidecar(sidecar_path_for(Path(sink_path)))
+    bucket = index.get(_SESSION_BINDING_KEY)
+    if not isinstance(bucket, dict):
+        return None
+    entry = bucket.get(session_id)
+    if entry is None:
+        return None
+    if not _valid_binding_entry(entry):
+        logger.warning(
+            "session binding for %s is malformed and will be treated as missing",
+            session_id[:12],
+        )
+        return None
+    return dict(entry)
+
+
+def record_session_binding(sink_path: Path, session_id: str, entry: Dict[str, Any]) -> bool:
+    """Write (or replace) the binding entry for ``session_id`` atomically.
+
+    Read-modify-write of the whole index, like ``update_session_state`` and
+    ``record_emitted_turns``, so every other bucket survives. Returns True
+    on success; logs and returns False on ``OSError`` (fail-open: the next
+    process takes the recovery path). Call under ``sink_lock``.
+    """
+    sidecar = sidecar_path_for(Path(sink_path))
+    try:
+        index = _read_sidecar(sidecar)
+        bucket = index.get(_SESSION_BINDING_KEY)
+        if not isinstance(bucket, dict):
+            bucket = {}
+        bucket[session_id] = dict(entry)
+        index[_SESSION_BINDING_KEY] = bucket
+        _write_sidecar_atomic(sidecar, index)
+        return True
+    except OSError as exc:
+        logger.warning("session binding update failed for %s: %s", sidecar, exc)
+        return False
+
+
+def build_binding_entry(
+    *,
+    resolution: str,
+    binding: Optional[str],
+    profile_content_hash: Optional[str],
+    source_path: Optional[str],
+    bound_by: str,
+    recovered_from: Optional[str] = None,
+    bound_at: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Assemble a binding entry in the CP1-D schema.
+
+    ``profile_content_hash`` ``None`` means the session is bound to NO
+    profile (which is distinct from having no binding at all).
+    """
+    if profile_content_hash is None:
+        fp = ch = snap = None
+    else:
+        ch = profile_content_hash
+        fp = ch[:12]
+        snap = snapshot_relative_path(ch)
+    return {
+        "schema": SESSION_BINDING_SCHEMA,
+        "resolution": resolution,
+        "binding": binding,
+        "profile_fingerprint": fp,
+        "profile_content_hash": ch,
+        "snapshot": snap,
+        "source_path": source_path if ch is not None else None,
+        "bound_at": bound_at or _iso_now(),
+        "bound_by": bound_by,
+        "recovered_from": recovered_from,
+    }
+
+
+def _iso_now() -> str:
+    now = datetime.now(timezone.utc)
+    return now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond // 1000:03d}Z"
+
+
+@dataclass(frozen=True)
+class Registration:
+    """What the trace's first ``AGENT_REGISTERED`` for a session says about
+    its governing profile.
+
+    ``has_provenance`` is True only when the registration payload carries
+    ``profile_resolution`` (written by a v0.3.2+ runtime under a bound or
+    degraded resolution). Pre-v0.3.2 registrations, and v0.3.2 default/none
+    registrations, carry no provenance; recovery then compares the
+    fingerprint only.
+    """
+
+    found: bool
+    profile_fingerprint: Optional[str] = None
+    profile_resolution: Optional[str] = None
+    profile_binding: Optional[str] = None
+
+    @property
+    def has_provenance(self) -> bool:
+        return self.profile_resolution is not None
+
+
+def read_registration(sink_path: Path, session_id: str) -> Registration:
+    """Return the first ``AGENT_REGISTERED`` for ``session_id`` in the sink.
+
+    Mirrors the intent-rehydration reader: a substring gate, then a JSON
+    parse of candidate lines, then an ``event_type`` and ``session_id``
+    check (shared-file mode interleaves sessions). Never raises;
+    ``Registration(found=False)`` when nothing is found or the sink cannot
+    be read.
+    """
+    try:
+        with Path(sink_path).open("r", encoding="utf-8") as handle:
+            for line in handle:
+                if "AGENT_REGISTERED" not in line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except (ValueError, TypeError):
+                    continue
+                if event.get("event_type") != "AGENT_REGISTERED":
+                    continue
+                if event.get("session_id") != session_id:
+                    continue
+                payload = event.get("payload") or {}
+                if not isinstance(payload, dict):
+                    payload = {}
+                return Registration(
+                    found=True,
+                    profile_fingerprint=_str_or_none(event.get("profile_fingerprint")),
+                    profile_resolution=_str_or_none(payload.get("profile_resolution")),
+                    profile_binding=_str_or_none(payload.get("profile_binding")),
+                )
+    except OSError:
+        return Registration(found=False)
+    return Registration(found=False)
+
+
+def _str_or_none(value: Any) -> Optional[str]:
+    return value if isinstance(value, str) and value else None

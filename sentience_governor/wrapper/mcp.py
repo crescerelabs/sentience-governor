@@ -65,6 +65,7 @@ from typing import Any, AsyncIterator, Callable, Dict, List, Optional
 from sentience_governor.cache.cache import InProcessCache
 from sentience_governor.event_builder.builder import EventBuilder
 from sentience_governor.profile import GovernanceProfile
+from sentience_governor.profile.resolver import resolve_profile
 from sentience_governor.schema.events import (
     ClassificationSource,
     DeploymentMode,
@@ -515,11 +516,12 @@ class _WrappedMCPSession:
     # ------------------------------------------------------------------
 
     def _start(self) -> None:
-        # v0.2.5: load operator-authored governance profile if present.
-        # When no file exists, profile is None and the session runs on
-        # the v0.2.4 code path (no profile transforms, no profile
-        # metadata in trace).
-        profile = GovernanceProfile.from_default_path_or_none()
+        # v0.3.2: resolve the governing profile for THIS agent (binding →
+        # default → none). One process per session, so the object stored
+        # by session_start is sticky by construction. None keeps the
+        # pre-profile code path (no transforms, no profile metadata).
+        resolved = resolve_profile(agent_id=self._agent_id)
+        profile: Optional[GovernanceProfile] = resolved.profile
         self._sm.session_start(
             session_id=self._session_id,
             agent_id=self._agent_id,
@@ -532,6 +534,8 @@ class _WrappedMCPSession:
             agent_id=self._agent_id,
             session_id=self._session_id,
             deployment_mode=self._deployment_mode,
+            profile_resolution=resolved.source,
+            profile_binding=resolved.binding,
         )
 
         # AGENT_REGISTERED
