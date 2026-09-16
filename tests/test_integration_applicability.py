@@ -54,12 +54,22 @@ def _core(tmp_path: Path, version: str) -> Path:
     return p
 
 
+def _toml():
+    """An independent TOML parser: stdlib `tomllib` on 3.11+, `tomli` below
+    (pytest itself depends on tomli there, so it is always present)."""
+    try:
+        import tomllib
+        return tomllib
+    except ModuleNotFoundError:  # Python 3.10
+        import tomli
+        return tomli
+
+
 def _real_companion_metadata():
     """The companion's version and core requirement read straight from its
-    pyproject with the stdlib parser: the oracle for every real-pair test, so
-    the suite never hard-codes what the companion currently declares."""
-    import tomllib
-    data = tomllib.loads(REAL_COMPANION.read_text(encoding="utf-8"))["project"]
+    pyproject with an independent parser: the oracle for every real-pair test,
+    so the suite never hard-codes what the companion currently declares."""
+    data = _toml().loads(REAL_COMPANION.read_text(encoding="utf-8"))["project"]
     core = [d for d in data["dependencies"] if d.lower().startswith("sentience-governor")]
     assert len(core) == 1
     return data["version"], core[0][len("sentience-governor"):].split(";")[0].strip(), data
