@@ -1,0 +1,3 @@
+schema_version: 1
+task_boundary:
+  signals: [1, null, dir_change]
