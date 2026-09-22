@@ -1,0 +1,3 @@
+schema_version: 1
+high_consequence:
+  tools: [1, 2]

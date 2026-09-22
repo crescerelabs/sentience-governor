@@ -12,22 +12,26 @@ Resolution chain, in order, with no other steps::
 * **Binding.** ``~/.sentience/resolution.yaml`` (see
   :data:`sentience_governor.profile.loader.DEFAULT_RESOLUTION_PATH`) lists
   bindings; the FIRST whose ``agent_id`` pattern matches is authoritative.
-  If its profile loads, the outcome is ``bound``. If it cannot be loaded
-  (missing, unreadable, unparseable, non-mapping root), the outcome is
-  ``degraded``: later bindings are NOT consulted; the chain proceeds to the
-  default step with the failure recorded. A resolution file that is
+  If its profile loads and is runtime-ready (``validate()`` reports no
+  errors), the outcome is ``bound``. If it cannot be loaded (missing,
+  unreadable, unparseable, non-mapping root, inadmissible content) or is
+  not runtime-ready, the outcome is ``degraded``: later bindings are NOT
+  consulted; the chain proceeds to the default step with the failure
+  recorded. A resolution file that is
   absent, unparseable, of the wrong schema version, or malformed at the top
   level is not a matched-binding failure: it is ignored with a warning and
   the chain proceeds to the default step.
-* **Default.** ``~/.sentience/profile.yaml`` if it exists, loaded exactly as
-  ``GovernanceProfile.from_default_path_or_none`` loads it today. That
-  includes its existing behaviour on a malformed default file (a
-  ``ValueError`` from ``from_file``), which is deliberately preserved:
-  changing it would alter shipped semantics at the MCP and LangChain call
-  sites.
+* **Default.** ``~/.sentience/profile.yaml`` if it exists, loaded as
+  ``GovernanceProfile.from_default_path_or_none`` loads it. Since v0.3.2.1
+  a default that cannot be loaded or is not runtime-ready does not raise
+  here: it is recorded as a warning and the chain proceeds to ``none``
+  (or ``degraded`` when a binding had matched). The agent runs without a
+  profile and the registration records that. ``from_default_path_or_none``
+  itself is unchanged, so the CLI and the MCP server's profile view keep
+  raising as before.
 * **None.** The pre-profile code path: no transforms, no fingerprint.
 
-The new layer never raises. Every problem it can encounter degrades to a
+This layer never raises. Every problem it can encounter degrades to a
 LESS specific outcome, is recorded in ``ResolvedProfile.warnings``, and is
 logged once at warning level. Fail-open is preserved and made visible.
 
@@ -101,10 +105,10 @@ def resolve_profile(
 
     When ``default_path`` is not given, the default step delegates to
     ``GovernanceProfile.from_default_path_or_none()`` itself, so the
-    existing entry point's behaviour (including its ``DEFAULT_PROFILE_PATH``
-    lookup and its raising on a malformed file) is reused rather than
-    re-implemented. The two module-level paths are read at call time from
-    the loader module, never bound at import.
+    existing entry point's ``DEFAULT_PROFILE_PATH`` lookup is reused rather
+    than re-implemented; any exception it raises is caught here and
+    recorded (v0.3.2.1). The two module-level paths are read at call time
+    from the loader module, never bound at import.
     """
     resolution_path = (
         _loader.DEFAULT_RESOLUTION_PATH
@@ -123,13 +127,29 @@ def resolve_profile(
             matched_pattern = pattern
             try:
                 profile = GovernanceProfile.from_file(target)
-            except (FileNotFoundError, ValueError, OSError, yaml.YAMLError) as exc:
+            except (
+                FileNotFoundError,
+                ValueError,
+                TypeError,
+                OSError,
+                yaml.YAMLError,
+            ) as exc:
                 _warn(
                     warnings,
                     f"binding '{pattern}' matched agent '{agent_id}' but its "
                     f"profile could not be loaded from {target}: "
                     f"{exc.__class__.__name__}: {exc}. Resolution is degraded; "
                     "later bindings are not consulted.",
+                )
+                break  # first match is authoritative, even when it fails
+            readiness = _loader._runtime_readiness(profile)
+            if readiness.errors:
+                _warn(
+                    warnings,
+                    f"binding '{pattern}' matched agent '{agent_id}' but its "
+                    f"profile at {target} is not runtime-ready: "
+                    f"{_first_errors(readiness.errors)}. Resolution is "
+                    "degraded; later bindings are not consulted.",
                 )
                 break  # first match is authoritative, even when it fails
             return ResolvedProfile(
@@ -145,14 +165,8 @@ def resolve_profile(
             "falling back to the default profile.",
         )
 
-    # ---- Step 2: default (existing semantics preserved, may raise) -------
-    if default_path is None:
-        default_profile = GovernanceProfile.from_default_path_or_none()
-    else:
-        default_path = Path(default_path)
-        default_profile = (
-            GovernanceProfile.from_file(default_path) if default_path.is_file() else None
-        )
+    # ---- Step 2: default (v0.3.2.1: fails open, never raises) ------------
+    default_profile = _load_default(default_path, warnings)
     if default_profile is not None:
         return ResolvedProfile(
             profile=default_profile,
@@ -168,6 +182,57 @@ def resolve_profile(
         binding=matched_pattern,
         warnings=tuple(warnings),
     )
+
+
+# ---------------------------------------------------------------------------
+# Default profile
+# ---------------------------------------------------------------------------
+
+
+def _load_default(
+    default_path: Optional[Path], warnings: List[str]
+) -> Optional[GovernanceProfile]:
+    """Load the default profile, or ``None`` with a warning when it is absent,
+    unloadable, or not runtime-ready.
+
+    A malformed default is a configuration error the operator must see; it
+    is not a reason to stop the governed application. The warning names the
+    file and the first errors; the caller resolves to ``none`` (or
+    ``degraded``) and the registration records that no profile was
+    activated.
+    """
+    shown_path = _loader.DEFAULT_PROFILE_PATH if default_path is None else Path(default_path)
+    try:
+        if default_path is None:
+            profile = GovernanceProfile.from_default_path_or_none()
+        else:
+            default_path = Path(default_path)
+            profile = GovernanceProfile.from_file(default_path) if default_path.is_file() else None
+    except Exception as exc:  # fail open: the layer never raises into the runtime
+        _warn(
+            warnings,
+            f"default profile could not be loaded from {shown_path}: "
+            f"{exc.__class__.__name__}: {exc}. Running without a profile.",
+        )
+        return None
+    if profile is None:
+        return None
+    readiness = _loader._runtime_readiness(profile)
+    if readiness.errors:
+        _warn(
+            warnings,
+            f"default profile at {shown_path} is not runtime-ready: "
+            f"{_first_errors(readiness.errors)}. Running without a profile.",
+        )
+        return None
+    return profile
+
+
+def _first_errors(errors: List[str], limit: int = 3) -> str:
+    shown = "; ".join(errors[:limit])
+    if len(errors) > limit:
+        shown += f"; and {len(errors) - limit} more"
+    return shown
 
 
 # ---------------------------------------------------------------------------

@@ -287,13 +287,42 @@ def test_unexpected_exception_in_binding_layer_falls_back_to_default(home: Path,
     assert any("resolution failed unexpectedly" in w for w in r.warnings)
 
 
-def test_malformed_default_profile_keeps_existing_raising_behaviour(home: Path):
-    """Locked plan §4-of-Rev-3: the default step is preserved exactly,
-    including the ValueError a malformed profile.yaml raises today via
-    from_default_path_or_none. Only the NEW layer never raises."""
+def test_malformed_default_profile_fails_open_to_none_with_a_warning(home: Path):
+    """v0.3.2.1: the default step no longer raises into the runtime. An
+    unparseable profile.yaml resolves to ``none`` with a warning that names
+    the file and the exception. ``from_default_path_or_none`` itself still
+    raises (the CLI and the MCP server's profile view rely on that)."""
     (home / "profile.yaml").write_text("- not\n- a mapping\n", encoding="utf-8")
+    r = _resolve(home, "anyone")
+    assert r.source == SOURCE_NONE
+    assert r.profile is None
+    assert len(r.warnings) == 1
+    assert "profile.yaml" in r.warnings[0] and "ValueError" in r.warnings[0]
     with pytest.raises(ValueError):
-        _resolve(home, "anyone")
+        GovernanceProfile.from_file(home / "profile.yaml")
+
+
+def test_invalid_default_profile_fails_open_to_none_with_a_warning(home: Path):
+    """v0.3.2.1 (D2-ii): a default that parses but is not runtime-ready is
+    treated like an unloadable one: ``none``, one warning naming the file
+    and the first validation errors, nothing raised."""
+    (home / "profile.yaml").write_text(
+        "schema_version: 1\nhigh_consequence:\n  tools: [1, 2]\n", encoding="utf-8"
+    )
+    r = _resolve(home, "anyone")
+    assert r.source == SOURCE_NONE and r.profile is None
+    assert len(r.warnings) == 1
+    assert "profile.yaml" in r.warnings[0] and "high_consequence.tools" in r.warnings[0]
+
+
+def test_invalid_default_after_failed_binding_is_degraded_with_no_profile(home: Path):
+    """Binding fails, default is invalid: provenance stays ``degraded`` (a
+    binding matched) and no profile is active. Both problems are recorded."""
+    _resolution_file(home / "resolution.yaml", [{"agent_id": "deploy-bot", "profile": "profiles/missing.yaml"}])
+    (home / "profile.yaml").write_text("schema_version: true\n", encoding="utf-8")
+    r = _resolve(home, "deploy-bot")
+    assert r.source == SOURCE_DEGRADED and r.binding == "deploy-bot" and r.profile is None
+    assert len(r.warnings) == 2
 
 
 def test_warnings_are_logged_once_each(home: Path, caplog):

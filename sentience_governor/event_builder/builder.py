@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 import sys
 import time
@@ -60,6 +61,10 @@ from sentience_governor.profile.schema import (
     OPERATION_ACTIONS,
     OPERATION_DOMAINS,
     OPERATION_RULE_KEYS,
+    SCHEMA_VERSION,
+    SECTION_HIGH_CONSEQUENCE,
+    SECTION_SESSION_INTENT,
+    SECTION_TASK_BOUNDARY,
     SIGNAL_DIR_CHANGE,
     SIGNAL_FILE_TYPE_SHIFT,
     SIGNAL_READ_TO_WRITE_TRANSITION,
@@ -330,6 +335,39 @@ def _detect_task_boundary(
     return False
 
 
+class _ProfileView:
+    """The checked, per-session reading of a profile (v0.3.2.1, see
+    ``EventBuilder._checked_profile``). Plain attributes; built once."""
+
+    __slots__ = (
+        "schema_version",
+        "session_intent",
+        "task_boundary",
+        "high_consequence",
+        "signals",
+        "time_gap_seconds",
+        "dir_change_depth",
+        "tools",
+    )
+
+    def __init__(
+        self,
+        *,
+        schema_version: Optional[int],
+        session_intent: Dict[str, Any],
+        task_boundary: Dict[str, Any],
+        high_consequence: Dict[str, Any],
+    ) -> None:
+        self.schema_version = schema_version
+        self.session_intent = session_intent
+        self.task_boundary = task_boundary
+        self.high_consequence = high_consequence
+        self.signals: List[str] = []
+        self.time_gap_seconds: Any = 300
+        self.dir_change_depth: Any = 2
+        self.tools: List[str] = []
+
+
 class EventBuilder:
     """Constructs and validates all governance events.
 
@@ -369,6 +407,141 @@ class EventBuilder:
         # exactly as v0.3.1.2 wrote it.
         self._profile_resolution = profile_resolution
         self._profile_binding = profile_binding
+        # v0.3.2.1: the checked profile view (see _checked_profile). Built
+        # once per session from the raw profile data; every consumer reads
+        # it instead of the profile's accessors. Keyed on the profile
+        # object so a session whose profile is replaced (a test seam; the
+        # runtime never does it) is re-checked rather than served stale.
+        self._profile_view: Optional[_ProfileView] = None
+        self._profile_view_source: Optional[object] = None
+        self._profile_warned: set = set()
+
+    # ------------------------------------------------------------------
+    # v0.3.2.1: checked profile view (runtime tolerance)
+    # ------------------------------------------------------------------
+
+    def _checked_profile(self, profile: object) -> "_ProfileView":
+        """Return the once-per-session checked view of ``profile``.
+
+        The validator (``GovernanceProfile.validate``) is the definition of
+        an invalid profile and the binding path refuses one before it gets
+        here. This is the defensive layer behind that: if a malformed
+        profile does arrive (a direct caller bypassing ``session_start``,
+        or a shape the validator does not know), each consumer substitutes
+        the default the validator would have insisted on, never a value
+        derived from the malformed one, and warns once per session per
+        field. No event or flag is added.
+
+        Raw values come from ``to_dict()``. The accessors cannot be used
+        for the checks: ``schema_version`` applies ``int()`` (so ``true``
+        becomes ``1``) and the section accessors apply ``dict()`` (so a
+        list of pairs becomes a mapping), which would turn an invalid
+        shape into policy.
+        """
+        if self._profile_view is not None and self._profile_view_source is profile:
+            return self._profile_view
+        try:
+            raw = profile.to_dict()  # type: ignore[attr-defined]
+        except Exception as exc:  # not a GovernanceProfile: govern from defaults
+            self._warn_profile_field("profile", f"could not be read ({exc.__class__.__name__}: {exc})", "no profile transforms")
+            raw = {}
+        if not isinstance(raw, dict):
+            self._warn_profile_field("profile", f"is {type(raw).__name__}, not a mapping", "no profile transforms")
+            raw = {}
+        view = _ProfileView(
+            schema_version=self._checked_schema_version(raw),
+            session_intent=self._checked_section(raw, SECTION_SESSION_INTENT),
+            task_boundary=self._checked_section(raw, SECTION_TASK_BOUNDARY),
+            high_consequence=self._checked_section(raw, SECTION_HIGH_CONSEQUENCE),
+        )
+        view.signals = self._checked_signals(view.task_boundary)
+        view.time_gap_seconds = self._checked_number(
+            view.task_boundary, "time_gap_seconds", default=300, integer_only=False, minimum=0
+        )
+        view.dir_change_depth = self._checked_number(
+            view.task_boundary, "dir_change_depth", default=2, integer_only=True, minimum=1
+        )
+        view.tools = self._checked_tools(view.high_consequence)
+        self._profile_view = view
+        self._profile_view_source = profile
+        return view
+
+    def _checked_schema_version(self, raw: Dict[str, Any]) -> Optional[int]:
+        value = raw.get("schema_version", SCHEMA_VERSION)
+        if isinstance(value, bool) or not isinstance(value, int):
+            self._warn_profile_field("schema_version", f"is {type(value).__name__}, not an integer", "not recorded")
+            return None
+        return value
+
+    def _checked_section(self, raw: Dict[str, Any], name: str) -> Dict[str, Any]:
+        value = raw.get(name)
+        if value is None:
+            return {}
+        if not isinstance(value, dict):
+            self._warn_profile_field(name, f"is {type(value).__name__}, not a mapping", "section ignored")
+            return {}
+        return value
+
+    def _checked_signals(self, task_boundary: Dict[str, Any]) -> List[str]:
+        value = task_boundary.get("signals")
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            self._warn_profile_field(f"{SECTION_TASK_BOUNDARY}.signals", f"is {type(value).__name__}, not a list", "no boundary detection")
+            return []
+        kept = [s for s in value if isinstance(s, str)]
+        if len(kept) != len(value):
+            self._warn_profile_field(f"{SECTION_TASK_BOUNDARY}.signals", f"has {len(value) - len(kept)} non-string entries", "those entries ignored")
+        return kept
+
+    def _checked_number(
+        self,
+        task_boundary: Dict[str, Any],
+        key: str,
+        *,
+        default: int,
+        integer_only: bool,
+        minimum: int,
+    ) -> Any:
+        value = task_boundary.get(key)
+        if value is None:
+            return default
+        ok = not isinstance(value, bool)
+        if ok:
+            ok = isinstance(value, int) if integer_only else isinstance(value, (int, float))
+        if ok and isinstance(value, float):
+            ok = math.isfinite(value)
+        if ok:
+            ok = value >= minimum
+        if not ok:
+            self._warn_profile_field(f"{SECTION_TASK_BOUNDARY}.{key}", f"is {value!r}", f"using {default}")
+            return default
+        return value
+
+    def _checked_tools(self, high_consequence: Dict[str, Any]) -> List[str]:
+        value = high_consequence.get("tools")
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            self._warn_profile_field(f"{SECTION_HIGH_CONSEQUENCE}.tools", f"is {type(value).__name__}, not a list", "no tool patterns")
+            return []
+        kept = [p for p in value if isinstance(p, str)]
+        if len(kept) != len(value):
+            self._warn_profile_field(f"{SECTION_HIGH_CONSEQUENCE}.tools", f"has {len(value) - len(kept)} non-string entries", "those entries skipped")
+        return kept
+
+    def _warn_profile_field(self, field: str, problem: str, substitution: str) -> None:
+        """Once per session per field: the profile reached the runtime malformed."""
+        if field in self._profile_warned:
+            return
+        self._profile_warned.add(field)
+        logger.warning(
+            "PROFILE_FIELD_IGNORED: session %s: profile field %s %s; %s",
+            self._session_id,
+            field,
+            problem,
+            substitution,
+        )
 
     # ------------------------------------------------------------------
     # Public factory methods (one per event type)
@@ -394,7 +567,9 @@ class EventBuilder:
         profile_schema_version: Optional[int] = None
         if profile is not None and getattr(profile, "source_path", None) is not None:
             profile_loaded = True
-            profile_schema_version = profile.schema_version  # type: ignore[attr-defined]
+            # v0.3.2.1: the raw value, checked; a boolean or fractional
+            # schema_version is recorded as absent, not coerced to 1.
+            profile_schema_version = self._checked_profile(profile).schema_version
 
         # v0.3.2: resolution provenance, recorded for bound/degraded only.
         profile_resolution: Optional[str] = None
@@ -798,12 +973,13 @@ class EventBuilder:
         out_flags = list(flags)
         out_violations = list(violations)
 
-        # Pull profile sections via the GovernanceProfile public read-only
-        # accessors. The profile module is independent of this one, so
-        # `profile` is typed as `object`; we duck-type the three properties.
-        session_intent = profile.session_intent  # type: ignore[attr-defined]
-        task_boundary = profile.task_boundary    # type: ignore[attr-defined]
-        high_consequence = profile.high_consequence  # type: ignore[attr-defined]
+        # v0.3.2.1: read the once-per-session checked view, never the
+        # accessors (see _checked_profile). A section that is not a
+        # mapping is {} for the session; malformed parameters take the
+        # validator's defaults; malformed collection entries are skipped.
+        view = self._checked_profile(profile)
+        session_intent = view.session_intent
+        high_consequence = view.high_consequence
 
         # ---- Transform 1: POL-001 gating per demand_at ----
         demand_at = session_intent.get("demand_at", DEMAND_AT_SESSION_START)
@@ -835,10 +1011,10 @@ class EventBuilder:
                 self._cache.mark_pol_001_fired(self._session_id)
 
         # ---- Transform 2: task-boundary signal detection ----
-        signals = task_boundary.get("signals") or []
+        signals = view.signals
         if signals:
-            time_gap_seconds = task_boundary.get("time_gap_seconds", 300)
-            dir_change_depth = task_boundary.get("dir_change_depth", 2)
+            time_gap_seconds = view.time_gap_seconds
+            dir_change_depth = view.dir_change_depth
             now_monotonic = time.monotonic()
             prior_state = self._cache.get_task_boundary_state(self._session_id)
             boundary_crossed = _detect_task_boundary(
@@ -865,7 +1041,7 @@ class EventBuilder:
             )
 
         # ---- Transform 3: high-consequence pattern match ----
-        hc_tools = high_consequence.get("tools") or []
+        hc_tools = view.tools
         if hc_tools:
             composite = f"{payload.tool_id}:{payload.target_system}"
             for pattern in hc_tools:
@@ -874,10 +1050,9 @@ class EventBuilder:
                         if AdvisoryFlag.HIGH_CONSEQUENCE_DETECTED not in out_flags:
                             out_flags.append(AdvisoryFlag.HIGH_CONSEQUENCE_DETECTED)
                         break
-                except re.error:
-                    # Malformed pattern in operator-authored profile.
-                    # Skip silently — validation surfaces this at load
-                    # time; runtime is not the place to crash.
+                except (re.error, TypeError):
+                    # Pattern that does not compile: validation warns at
+                    # load time; the runtime skips it, as it always has.
                     continue
 
         # ---- Transform 3b (v0.3.2): per-effect operations rules ----

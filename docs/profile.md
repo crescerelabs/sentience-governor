@@ -38,7 +38,7 @@ enforcement:
 sentience profile init       # create starter profile (inline-commented)
 sentience profile view       # inspect it
 sentience profile edit       # tune it ($VISUAL/$EDITOR, else nano/vim/vi, else macOS TextEdit)
-sentience profile validate   # schema check (read-only)
+sentience profile validate   # schema and runtime-field check (read-only)
 ```
 
 Sessions started after the file exists pick it up automatically: no
@@ -72,8 +72,8 @@ bindings:
 ```
 
 **Degraded, not fall-through.** If the first matching binding's profile
-cannot be loaded (missing file, malformed YAML), the resolution is
-`degraded`: the session falls back to the machine default when one
+cannot be loaded (missing file, malformed YAML) or is not valid (see
+below), the resolution is `degraded`: the session falls back to the machine default when one
 exists, and to no profile otherwise. **A later binding is never
 consulted.** The chosen binding is the operator's decision; a broken file
 is surfaced as a warning and in the trace, not silently replaced by the
@@ -82,6 +82,45 @@ next rule.
 A malformed resolution file is ignored with a warning (the default step
 still applies); a malformed binding entry is skipped while the rest of the
 file is used.
+
+**Invalid profiles never reach a session (0.3.2.1).** Loading a profile
+checks the fields the runtime consumes, not only the shape of the file:
+`schema_version` must be an integer; `task_boundary.signals` and
+`high_consequence.tools` must be lists whose entries are strings;
+`task_boundary.time_gap_seconds` must be a finite number of at least 0 and
+`task_boundary.dir_change_depth` an integer of at least 1; each section
+must be a mapping; and every mapping key must be a string.
+`sentience profile validate` reports each of these as an error (a `tools`
+pattern that does not compile as a regular expression is a warning; the
+runtime skips it). A profile with any such error is treated exactly like
+one that could not be loaded:
+
+- **Bound to it:** the resolution is `degraded`, the warning names the
+  file and the first errors, no later binding is consulted, and the
+  session runs on the machine default when one exists and on no profile
+  otherwise.
+- **As the machine default:** the session runs without a profile. The
+  resolution is `none` (or `degraded` when a binding had matched), the
+  warning names the file, and `AGENT_REGISTERED` records no
+  `profile_loaded`. Before 0.3.2.1 an unparseable default raised into the
+  MCP wrapper's `async with` and left a LangChain run ungoverned with no
+  warning; both now continue with the warning and the record.
+- **Passed directly to `session_start`** (an integration that constructs
+  its own `GovernanceProfile`): nothing is activated, one warning names the
+  session and the errors, and the call returns normally.
+- **A Claude Code snapshot from an earlier release** that rebuilds into an
+  invalid profile is not used; the hook resolves again as a new session
+  would and leaves the snapshot file in place.
+
+Nothing raises into the governed application and nothing is blocked: the
+run proceeds on the fallback, the warning says why, and the registration
+records what was actually activated. Should a malformed value still reach
+the runtime by some other path, each consumer substitutes the default the
+validator requires rather than deriving policy from the malformed value,
+and logs that field once per session. Valid parts of the same profile keep
+applying: a `dir_change` signal still detects boundaries when
+`dir_change_depth` is invalid (at the default depth), while an invalid
+`time_gap_seconds` detects nothing rather than firing on every event.
 
 **Provenance in the trace.** When a session resolved through a binding,
 its `AGENT_REGISTERED` payload carries `profile_resolution` (`bound` or
@@ -124,7 +163,7 @@ write no sidecar and no snapshot.
 
 **`pydantic-ai-governor`** 0.1.0 pins core to versions below 0.3.2 and
 binds no resolved profile. Per-agent resolution for Pydantic AI arrives in
-a separate companion release, 0.1.1, which follows core 0.3.2; it is not
+a separate companion release, 0.1.1, which follows core 0.3.2.1; it is not
 part of this release.
 
 ### Diagnostics

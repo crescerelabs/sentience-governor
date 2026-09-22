@@ -5,6 +5,81 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.2.1] — 2026-09-22
+
+**A profile that parses but is not valid no longer raises inside the
+governed run.** In 0.3.2 the validator checked the shape of the file but
+not every value the runtime consumes, so a profile could pass
+`sentience profile validate`, be bound to a session, and then fail at the
+first governed action: `high_consequence.tools: [1, 2]` raised in the
+pattern match, a string `dir_change_depth` raised in boundary detection,
+and a boolean `schema_version` was recorded as `1`. In the Claude Code hook
+the tool call proceeded with no `SCOPE_ASSERTED` recorded. Reported as
+issue #19.
+
+### Fixed
+- **Validation covers the fields the runtime consumes.** `schema_version`
+  must be an integer (not a boolean); `task_boundary.signals` and
+  `high_consequence.tools` must be lists whose entries are strings;
+  `task_boundary.time_gap_seconds` must be a finite number of at least 0
+  and `task_boundary.dir_change_depth` an integer of at least 1; each
+  section must be a mapping. A `tools` pattern that does not compile as a
+  regular expression is now reported as a warning (the runtime already
+  skipped it silently). `sentience profile validate` reports every one of
+  these; `profile import` refuses them as it refuses any validation error.
+- **Invalid profiles are stopped at binding.** A matched binding whose file
+  is invalid resolves `degraded` exactly as a missing or unparseable file
+  does: the warning names the file and the first errors, no later binding
+  is consulted, and the session runs on the machine default or on no
+  profile. A profile passed directly to `session_start` that is invalid is
+  refused: the session opens with no profile, one warning names the session
+  and the errors, and nothing is raised. A Claude Code snapshot written by
+  an earlier release for a profile that is now invalid is not used; the
+  hook resolves again as a new session would and leaves the snapshot file
+  in place.
+- **Non-string mapping keys are rejected at load.** A profile whose YAML
+  has an integer, boolean, null or date key anywhere raises `ValueError`
+  naming the key path, where 0.3.2 silently rewrote such keys as strings.
+  Such keys were never meaningful to any consumer. Profiles with string
+  keys are untouched.
+- **The runtime tolerates what still reaches it.** Should a malformed value
+  arrive by any other path, each consumer substitutes the default the
+  validator requires (300 for `time_gap_seconds`, 2 for `dir_change_depth`,
+  an empty list for a malformed `signals` or `tools`, an empty section for
+  one that is not a mapping, no recorded `profile_schema_version` for a
+  non-integer one) and logs the field once per session. No policy is derived
+  from a malformed value: an invalid time gap detects no boundary, while a
+  valid `dir_change` signal alongside an invalid depth still does, at the
+  default depth.
+
+### Changed
+- **A malformed machine default no longer raises into the MCP wrapper or
+  the LangChain handler.** In 0.3.2 an unparseable `~/.sentience/profile.yaml`
+  raised from the MCP wrapper's `async with` and stopped the agent, and in
+  the LangChain handler the exception was swallowed by the callback manager,
+  so the run continued ungoverned with no warning and no record. Both now
+  resolve to no profile (or `degraded` when a binding had matched), log one
+  warning naming the file, and record the session with no `profile_loaded`.
+  The same applies to a default that parses but is invalid. The Claude Code
+  hook and the Pydantic AI companion already failed open here; their
+  behaviour is unchanged apart from the warning text.
+  `GovernanceProfile.from_default_path_or_none()` itself still raises, so
+  `sentience profile view` and the MCP server's profile view report the
+  error as before.
+
+### Notes
+- **Well-formed profiles are unchanged.** Canonical bytes, fingerprints,
+  snapshots, the resolution order, first-match authority and every
+  governance outcome are identical to 0.3.2 for every valid profile; the
+  0.3.2 clean-room scenarios replay event for event. No event type,
+  advisory flag, policy code or record field is added, and nothing is
+  blocked: Governor evaluates and records, as before.
+- **Compatibility statement.** A profile that 0.3.2 accepted by mistake may
+  now be rejected. Where it is, the change is a warning and a fallback,
+  never an exception into the run.
+
+---
+
 ## [0.3.2] — 2026-09-15
 
 **Which policy governs this session, what the agent is actually doing, and

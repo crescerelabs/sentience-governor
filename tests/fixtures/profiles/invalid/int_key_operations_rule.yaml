@@ -1,0 +1,3 @@
+schema_version: 1
+high_consequence:
+  operations: [{domain: filesystem, 1: x}]

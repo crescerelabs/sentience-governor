@@ -1,0 +1,4 @@
+schema_version: 1
+task_boundary:
+  signals: [dir_change]
+  dir_change_depth: 1.5

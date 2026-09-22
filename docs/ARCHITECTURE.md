@@ -151,7 +151,7 @@ These slots exist so future operator-authored governance composes additively rat
 
 ### Validation discipline
 
-The profile loader is read-only. `sentience profile validate` checks the schema, reports per-field errors and warnings, and never mutates the operator-authored file. If the profile is malformed, the wrapper proceeds without it and the session continues to be governed by the default policy set.
+The profile loader is read-only. `sentience profile validate` checks the schema and, since 0.3.2.1, every field the runtime consumes (section shapes, `schema_version`, the task-boundary parameters, the signal and tool-pattern lists, string-only mapping keys); it reports per-field errors and warnings and never mutates the operator-authored file. The same check is the runtime's readiness decision, so a profile with an error is never bound: a bound file that fails it degrades to the machine default, a default that fails it leaves the session without a profile, and a profile handed directly to a session is refused. Each case is one warning and a truthful registration, never an exception into the governed application. Behind that, every runtime consumer reads a checked view of the profile and substitutes its default for any malformed field rather than deriving policy from it.
 
 ---
 
