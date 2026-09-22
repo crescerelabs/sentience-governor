@@ -306,6 +306,15 @@ class GovernanceProfile:
         *,
         source_path: Optional[Path] = None,
     ) -> None:
+        # v0.3.2.1: admissible representation. Every mapping key must be a
+        # string before the JSON round trip below, which would otherwise
+        # coerce integer, boolean and null keys to strings silently (and
+        # raise TypeError for date keys). Keys unknown to every consumer
+        # were never legitimate; rejecting them here, in the one place all
+        # construction paths pass, is the whole of the check. Profiles with
+        # string keys are untouched, so canonical bytes and fingerprints are
+        # unchanged.
+        _reject_non_string_keys(data, "<root>")
         # Store a deep copy so external callers cannot mutate
         # profile state after construction.
         self._data = json.loads(json.dumps(data))
@@ -947,6 +956,26 @@ def _canonical_operation_rules(rules: List[Any]) -> List[Any]:
                     ]
         serialized.add(json.dumps(rule, sort_keys=True, separators=(",", ":")))
     return [json.loads(s) for s in sorted(serialized)]
+
+
+def _reject_non_string_keys(value: Any, path: str) -> None:
+    """Raise ``ValueError`` naming the key path for any non-string mapping key.
+
+    Walks mappings and sequences; scalars are not inspected (value types are
+    the JSON round trip's concern, which raises ``TypeError`` for dates,
+    bytes and sets exactly as before).
+    """
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if not isinstance(key, str):
+                raise ValueError(
+                    f"Profile mapping keys must be strings; got "
+                    f"{type(key).__name__} key {key!r} at {path}."
+                )
+            _reject_non_string_keys(child, f"{path}.{key}" if path != "<root>" else key)
+    elif isinstance(value, (list, tuple)):
+        for index, child in enumerate(value):
+            _reject_non_string_keys(child, f"{path}[{index}]")
 
 
 def _runtime_readiness(profile: "GovernanceProfile") -> ProfileValidationResult:
