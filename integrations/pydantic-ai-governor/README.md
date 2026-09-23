@@ -254,6 +254,69 @@ so Sentience Governor opens a new session. The two are not merged. This
 release introduces no cross-run correlation, and presenting two runs as one
 session would be a claim about continuity that nothing here verifies.
 
+## Which profile governs a run
+
+Since 0.1.1 each run resolves the governance profile that applies to it,
+using the core package's own resolution (Sentience Governor 0.3.2.1 or
+later), keyed on the capability's `agent_id`. Resolution happens once, when
+the session opens, and the result is fixed for the life of the run. There is
+no `profile=` argument: which profile applies is the operator's decision,
+made in `~/.sentience/`, not the developer's at construction time.
+
+The chain, in order, with no other steps:
+
+| Outcome | When | What the run gets | Recorded on the registration |
+| :-- | :-- | :-- | :-- |
+| `bound` | `~/.sentience/resolution.yaml` exists and the **first** `agent_id` pattern that matches names a profile that loads and is valid | that profile | `profile_resolution: bound`, `profile_binding: <pattern>` |
+| `degraded` | the first matching pattern names a file that is missing, unparseable or not valid | the machine default `~/.sentience/profile.yaml` if it exists and is valid, otherwise no profile; **a later binding is never consulted** | `profile_resolution: degraded`, `profile_binding: <pattern>` |
+| `default` | no resolution file, or no pattern matches | `~/.sentience/profile.yaml` | nothing extra: the registration is the same as before 0.1.1 |
+| `none` | no match and no default, or a default that is unparseable or not valid | no profile, the 0.1.0 behaviour | nothing extra |
+
+A profile that parses but is not valid (a wrong type where the runtime reads
+a value, a mapping key that is not a string) is treated exactly like one that
+could not be loaded: it is never bound. The core validator decides; this
+package does not re-implement the schema. As a second check, a profile the
+resolver hands back is used only if it exposes its sections and fingerprint
+and passes core's `validate()`; otherwise the run continues with no profile
+and the registration says so.
+
+**Every resolution problem is one warning, once, at session open.** A
+`degraded` binding, an invalid or unparseable default, a malformed resolution
+file (ignored, the default step still applies) or a malformed binding entry
+(skipped) produces one `UserWarning` for the developer and one
+`GOVERNANCE_ERROR` record with `agent_continued: true`, and then nothing
+more for the rest of the run. Nothing raises into the Pydantic AI run.
+
+**What a bound profile changes.** Once a profile is bound, the core
+package's existing profile-driven evaluation applies to this integration's
+events exactly as it does for the core MCP wrapper:
+
+- `session_intent.demand_at` gates the undeclared-scope violation (`POL-001`)
+  on scope assertions; `never` suppresses it.
+- `task_boundary` signals are evaluated over the declared `target_system`
+  values of successive tool calls.
+- `high_consequence.tools` patterns are matched against
+  `<tool name>:<target_system>`, for example `crm_fetch:crm`, and attach the
+  advisory `HIGH_CONSEQUENCE_DETECTED` flag.
+- `high_consequence.operations` rules **do not apply** to Pydantic AI tool
+  calls. Those rules match the semantic classification the core package
+  derives for Claude Code `Bash` commands (`operation_classification`); this
+  integration records developer-declared execution evidence and emits no
+  such classification, so an operations rule has nothing to match and never
+  fires here. A profile that carries only operations rules still binds and
+  its fingerprint is recorded; the rules are inert for these events.
+
+Every event of a run under an operator-authored profile carries that
+profile's 12-character `profile_fingerprint`, so traces correlate to the
+policy that produced them. The full content hash never appears in this
+integration's evidence, and no snapshot file or sidecar is written: one run
+is one process, so the resolved profile is sticky by construction. Editing
+`resolution.yaml` or a profile file changes nothing for a run already open;
+the next run resolves fresh.
+
+As everywhere in Sentience Governor, a profile shapes what is evaluated and
+recorded. It does not halt, refuse, delay or alter a tool call.
+
 ## What evidence is produced
 
 Each session writes one append-only JSONL file:

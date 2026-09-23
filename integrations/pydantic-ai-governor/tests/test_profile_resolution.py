@@ -346,6 +346,68 @@ async def test_concurrent_runs_on_one_agent_share_one_resolution(isolated_home, 
 
 
 # ---------------------------------------------------------------------------
+# Item 8: profile-driven governance through the companion
+# ---------------------------------------------------------------------------
+
+CRM_READ = {"sentience_governor": {
+    "operation": "READ", "target_system": "crm", "classification": ["internal"]}}
+PROFILE_GOV = (
+    "schema_version: 1\n"
+    "session_intent:\n  demand_at: never\n"
+    "high_consequence:\n"
+    "  tools: ['crm_fetch:crm']\n"
+    "  operations:\n    - domain: network\n      action: read\n"
+)
+PROFILE_OPS_ONLY = (
+    "schema_version: 1\n"
+    "high_consequence:\n  operations:\n    - domain: network\n      action: read\n"
+)
+
+
+async def test_bound_profile_drives_governance_of_companion_events(isolated_home, config):
+    """Core's profile transforms apply to the companion's events once a
+    profile is bound: `demand_at: never` suppresses POL-001 on the scope
+    assertion, and a `high_consequence.tools` pattern over
+    `tool_name:target_system` flags it. The baseline run without a profile
+    shows the same call producing POL-001 and no flag."""
+    tool = Tool(crm_fetch, metadata=CRM_READ)
+    baseline, warned0 = await run(gov(scope=["billing"]), model=one_call_model(), tools=[tool])
+    scope0 = of_type(events(isolated_home, baseline.run_id), "SCOPE_ASSERTED")[0]
+    assert warned0 == []
+    assert "POL-001" in scope0["policy_violations"]
+    assert "HIGH_CONSEQUENCE_DETECTED" not in (scope0.get("advisory_flags") or [])
+
+    p = config.profile("gov.yaml", PROFILE_GOV)
+    config.bind(("pydantic-*", "profiles/gov.yaml"))
+    result, warned = await run(gov(scope=["billing"]), model=one_call_model(), tools=[tool])
+    assert result.output == "done" and warned == []
+    evs = events(isolated_home, result.run_id)
+    scope = of_type(evs, "SCOPE_ASSERTED")[0]
+    assert scope["payload"]["tool_id"] == "crm_fetch" and scope["payload"]["target_system"] == "crm"
+    assert "POL-001" not in scope["policy_violations"]          # demand_at: never
+    assert "HIGH_CONSEQUENCE_DETECTED" in scope["advisory_flags"]  # tools: ['crm_fetch:crm']
+    assert fingerprints(evs) == {Config.fingerprint(p)}
+    reg = registration(evs)["payload"]
+    assert reg["profile_resolution"] == "bound" and reg["profile_binding"] == "pydantic-*"
+
+
+async def test_operations_rules_never_fire_for_companion_events(isolated_home, config):
+    """The companion emits no `operation_classification`, so a
+    `high_consequence.operations` rule has nothing to match, even one that
+    would match a network read. Pinned so nobody expects Bash semantics from
+    a Pydantic tool call. The profile is bound and its fingerprint recorded;
+    only the rule is inert."""
+    d = config.set_default(PROFILE_OPS_ONLY)
+    result, warned = await run(gov(), model=one_call_model(), tools=[Tool(crm_fetch, metadata=CRM_READ)])
+    assert result.output == "done" and warned == []
+    evs = events(isolated_home, result.run_id)
+    assert all("operation_classification" not in (e.get("payload") or {}) for e in evs)
+    scope = of_type(evs, "SCOPE_ASSERTED")[0]
+    assert "HIGH_CONSEQUENCE_DETECTED" not in (scope.get("advisory_flags") or [])
+    assert fingerprints(evs) == {Config.fingerprint(d)}
+
+
+# ---------------------------------------------------------------------------
 # Item 9: fail-open
 # ---------------------------------------------------------------------------
 
