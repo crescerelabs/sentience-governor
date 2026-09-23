@@ -37,21 +37,18 @@ happen. For real output, see [See it work](#see-it-work) below.*
 
 ## What's new
 
-**0.3.2** answers three questions from the trace: which policy governs this
-session, what the agent is actually doing, and whether that action triggers
-the governing policy. An optional `~/.sentience/resolution.yaml` binds agents
-to profiles by `agent_id`, first match wins, resolved once per session and
-recorded on the session's registration; the Claude Code hook keeps the bound
-profile sticky across its per-call processes, so editing a profile mid-session
-no longer changes that session, and `sentience profile resolve` shows what
-happened. Every Claude Code `Bash` event now carries a deterministic reading
-of what the command does: segments and effects with a domain, an action and a
-three-state `destructive`, with anything unreadable marked `unknown` rather
-than guessed. Profiles can flag those effects with `high_consequence.operations`
-rules that match one effect at a time, so `rm -rf /tmp && aws ec2
-describe-instances` never becomes a destructive cloud match. Nothing is
-blocked, `operation_type` is unchanged, and existing profiles keep their
-fingerprint.
+**0.3.2.1** closes the gap between what `sentience profile validate` accepts
+and what the runtime can use. A profile that parsed but held the wrong kind
+of value where the runtime reads one, such as a number in the
+`high_consequence.tools` list or a word in `dir_change_depth`, could pass
+validation in 0.3.2 and then raise inside the governed run; in Claude Code
+the tool call went unrecorded. Validation now checks every field the runtime
+consumes, an invalid profile is never bound (a bound file degrades to the
+machine default, an invalid default leaves the session on no profile, and
+each case is one warning and a truthful registration), and the runtime
+substitutes safe defaults for anything that still reaches it. Valid
+profiles keep their fingerprints and their behaviour, event for event.
+Nothing is blocked; the record now says what actually governed the session.
 
 **Pydantic AI support ships as its own distribution.**
 [`pydantic-ai-governor`](https://pypi.org/project/pydantic-ai-governor/)
@@ -62,7 +59,7 @@ against the declaration state recorded before the run, with measured per-turn
 token usage. It installs separately, versions separately, and Sentience
 Governor itself takes on no Pydantic AI dependency. It pins core below 0.3.2;
 a 0.1.1 companion release adopting per-agent policy resolution follows
-separately.
+separately, on core 0.3.2.1.
 
 Earlier releases, in full, are in the
 [changelog](https://github.com/crescerelabs/sentience-governor/blob/main/CHANGELOG.md).

@@ -93,6 +93,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from sentience_governor.cache.cache import InProcessCache
 from sentience_governor.event_builder.builder import EventBuilder
 from sentience_governor.profile import GovernanceProfile
+from sentience_governor.profile.loader import _runtime_readiness
 from sentience_governor.profile.resolver import ResolvedProfile, resolve_profile
 from sentience_governor.schema.events import (
     OperationClassification,
@@ -545,6 +546,12 @@ def _rehydrate_binding(sink_path: Path, entry: dict) -> Optional[_BoundProfile]:
     mismatch, fingerprint mismatch), each logged by the reader that found it.
     The full-hash check happens inside ``read_profile_snapshot`` before any
     fingerprint is computed.
+
+    v0.3.2.1: also ``None``, with one warning, when the rebuilt profile is
+    not runtime-ready. An earlier release may have bound and snapshotted a
+    profile that the validator now rejects; the caller re-resolves fresh,
+    which degrades to the default as a new session would. The snapshot file
+    is neither deleted nor rewritten: it is history.
     """
     resolution = entry["resolution"]
     binding = entry.get("binding")
@@ -572,6 +579,15 @@ def _rehydrate_binding(sink_path: Path, entry: dict) -> Optional[_BoundProfile]:
     fingerprint = profile.fingerprint()
     if fingerprint != entry["profile_fingerprint"]:
         logger.warning("claude_code_hook: rebuilt profile does not reproduce the bound fingerprint")
+        return None
+    readiness = _runtime_readiness(profile)
+    if readiness.errors:
+        logger.warning(
+            "claude_code_hook: the bound profile snapshot (%s) is not "
+            "runtime-ready (%s); re-resolving",
+            entry.get("source_path") or entry["snapshot"],
+            "; ".join(readiness.errors[:3]),
+        )
         return None
     return _BoundProfile(profile, resolution, binding, fingerprint, content_hash, recovered_from)
 

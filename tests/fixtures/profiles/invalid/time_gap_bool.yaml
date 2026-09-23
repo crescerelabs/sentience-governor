@@ -1,0 +1,4 @@
+schema_version: 1
+task_boundary:
+  signals: [time_gap]
+  time_gap_seconds: true

@@ -134,6 +134,15 @@ class SessionManager:
             policy evaluation. The profile is immutable for the session's
             lifetime; mid-session changes to ``~/.sentience/profile.yaml``
             do not affect any already-active session.
+
+            v0.3.2.1: a profile that is not runtime-ready (its
+            ``validate()`` reports errors) is refused: the session opens
+            with no profile, one warning names the session and the
+            errors, and nothing is raised. The caller has already opened
+            a run; refusing quietly keeps the fail-open discipline the
+            runtime promises. Resolver-fed callers never reach this
+            branch because the resolver checks readiness first; it
+            exists for direct callers that construct a profile themselves.
         allow_concurrent
             v0.3.0.2. When ``False`` (default), every session already live
             for this agent is force-closed before the new one opens — the
@@ -147,6 +156,8 @@ class SessionManager:
             invocations through one handler, so two live sessions for one
             agent are legitimate rather than a collision.
         """
+        if profile is not None:
+            profile = self._admit_profile(session_id, profile)
         with self._registry_lock:
             if not allow_concurrent:
                 # Collision: this agent already has live sessions. Close
@@ -184,6 +195,44 @@ class SessionManager:
             entry.last_event_id = initial_last_event_id
             self._sessions[session_id] = entry
             self._agent_sessions.setdefault(agent_id, set()).add(session_id)
+
+    @staticmethod
+    def _admit_profile(session_id: str, profile: object) -> Optional[object]:
+        """Return ``profile`` if it is runtime-ready, else ``None`` after one warning.
+
+        The readiness rules live in ``GovernanceProfile.validate()``; this
+        only applies the decision. Never raises: a profile that cannot even
+        be assessed is refused the same way.
+        """
+        # Imported here: the profile package must not be imported at module
+        # load (see _SessionEntry).
+        from sentience_governor.profile.loader import _runtime_readiness
+
+        try:
+            readiness = _runtime_readiness(profile)  # type: ignore[arg-type]
+        except Exception as exc:
+            logger.warning(
+                "PROFILE_REFUSED: session %s: the profile could not be assessed "
+                "(%s: %s); the session runs without a profile",
+                session_id,
+                exc.__class__.__name__,
+                exc,
+            )
+            return None
+        if not readiness.errors:
+            return profile
+        source = getattr(profile, "source_path", None)
+        shown = readiness.errors[:3]
+        more = len(readiness.errors) - len(shown)
+        logger.warning(
+            "PROFILE_REFUSED: session %s: profile%s is not runtime-ready "
+            "(%s%s); the session runs without a profile",
+            session_id,
+            f" {source}" if source is not None else "",
+            "; ".join(shown),
+            f"; and {more} more" if more > 0 else "",
+        )
+        return None
 
     def session_end(self, session_id: str) -> None:
         """Transition session ACTIVE → CLOSING → CLOSED."""

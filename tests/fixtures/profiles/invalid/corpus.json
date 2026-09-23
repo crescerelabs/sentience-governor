@@ -1,0 +1,744 @@
+{
+  "issue": 19,
+  "purpose": "Malformed-but-parseable governance profiles: what validate(), resolution, session binding and runtime evaluation must do with each.",
+  "run_shape": {
+    "fs_read": "filesystem/a/b.txt",
+    "fs_write": "filesystem/x/y.py",
+    "bash": "shell"
+  },
+  "fixtures": [
+    {
+      "file": "session_intent_list.yaml",
+      "category": "A",
+      "class": "section-type",
+      "expected": {
+        "error_field": "session_intent",
+        "runtime": {
+          "completes": true,
+          "task_boundary_flag": false,
+          "high_consequence_flag": false
+        }
+      }
+    },
+    {
+      "file": "session_intent_string.yaml",
+      "category": "A",
+      "class": "section-type",
+      "expected": {
+        "error_field": "session_intent",
+        "runtime": {
+          "completes": true,
+          "task_boundary_flag": false,
+          "high_consequence_flag": false
+        }
+      }
+    },
+    {
+      "file": "task_boundary_list.yaml",
+      "category": "A",
+      "class": "section-type",
+      "expected": {
+        "error_field": "task_boundary",
+        "runtime": {
+          "completes": true,
+          "task_boundary_flag": false,
+          "high_consequence_flag": false
+        }
+      }
+    },
+    {
+      "file": "task_boundary_string.yaml",
+      "category": "A",
+      "class": "section-type",
+      "expected": {
+        "error_field": "task_boundary",
+        "runtime": {
+          "completes": true,
+          "task_boundary_flag": false,
+          "high_consequence_flag": false
+        }
+      }
+    },
+    {
+      "file": "high_consequence_list.yaml",
+      "category": "A",
+      "class": "section-type",
+      "expected": {
+        "error_field": "high_consequence",
+        "runtime": {
+          "completes": true,
+          "task_boundary_flag": false,
+          "high_consequence_flag": false
+        }
+      }
+    },
+    {
+      "file": "high_consequence_string.yaml",
+      "category": "A",
+      "class": "section-type",
+      "expected": {
+        "error_field": "high_consequence",
+        "runtime": {
+          "completes": true,
+          "task_boundary_flag": false,
+          "high_consequence_flag": false
+        }
+      }
+    },
+    {
+      "file": "high_consequence_int.yaml",
+      "category": "A",
+      "class": "section-type",
+      "expected": {
+        "error_field": "high_consequence",
+        "runtime": {
+          "completes": true,
+          "task_boundary_flag": false,
+          "high_consequence_flag": false
+        }
+      }
+    },
+    {
+      "file": "schema_version_str.yaml",
+      "category": "A",
+      "class": "schema-version",
+      "expected": {
+        "error_field": "schema_version",
+        "runtime": {
+          "completes": true,
+          "task_boundary_flag": false,
+          "high_consequence_flag": false
+        },
+        "schema_version_recorded": null
+      }
+    },
+    {
+      "file": "tools_ints.yaml",
+      "category": "A",
+      "class": "tools-entry-type",
+      "expected": {
+        "error_field": "high_consequence.tools",
+        "runtime": {
+          "completes": true,
+          "task_boundary_flag": false,
+          "high_consequence_flag": false
+        }
+      }
+    },
+    {
+      "file": "tools_null_elem.yaml",
+      "category": "A",
+      "class": "tools-entry-type",
+      "expected": {
+        "error_field": "high_consequence.tools",
+        "runtime": {
+          "completes": true,
+          "task_boundary_flag": false,
+          "high_consequence_flag": false
+        }
+      }
+    },
+    {
+      "file": "time_gap_str.yaml",
+      "category": "A",
+      "class": "time-gap",
+      "expected": {
+        "error_field": "time_gap_seconds",
+        "runtime": {
+          "completes": true,
+          "task_boundary_flag": false,
+          "high_consequence_flag": false
+        }
+      }
+    },
+    {
+      "file": "time_gap_list.yaml",
+      "category": "A",
+      "class": "time-gap",
+      "expected": {
+        "error_field": "time_gap_seconds",
+        "runtime": {
+          "completes": true,
+          "task_boundary_flag": false,
+          "high_consequence_flag": false
+        }
+      }
+    },
+    {
+      "file": "dir_depth_str.yaml",
+      "category": "A",
+      "class": "dir-depth",
+      "expected": {
+        "error_field": "dir_change_depth",
+        "runtime": {
+          "completes": true,
+          "task_boundary_flag": true,
+          "high_consequence_flag": false
+        }
+      }
+    },
+    {
+      "file": "dir_depth_fraction.yaml",
+      "category": "A",
+      "class": "dir-depth",
+      "expected": {
+        "error_field": "dir_change_depth",
+        "runtime": {
+          "completes": true,
+          "task_boundary_flag": true,
+          "high_consequence_flag": false
+        }
+      }
+    },
+    {
+      "file": "dir_depth_nan.yaml",
+      "category": "A",
+      "class": "dir-depth",
+      "expected": {
+        "error_field": "dir_change_depth",
+        "runtime": {
+          "completes": true,
+          "task_boundary_flag": true,
+          "high_consequence_flag": false
+        }
+      }
+    },
+    {
+      "file": "dir_depth_inf.yaml",
+      "category": "A",
+      "class": "dir-depth",
+      "expected": {
+        "error_field": "dir_change_depth",
+        "runtime": {
+          "completes": true,
+          "task_boundary_flag": true,
+          "high_consequence_flag": false
+        }
+      }
+    },
+    {
+      "file": "time_gap_negative.yaml",
+      "category": "A",
+      "class": "time-gap-range",
+      "expected": {
+        "error_field": "time_gap_seconds",
+        "runtime": {
+          "completes": true,
+          "task_boundary_flag": false,
+          "high_consequence_flag": false
+        }
+      }
+    },
+    {
+      "file": "time_gap_nan.yaml",
+      "category": "A",
+      "class": "time-gap-range",
+      "expected": {
+        "error_field": "time_gap_seconds",
+        "runtime": {
+          "completes": true,
+          "task_boundary_flag": false,
+          "high_consequence_flag": false
+        }
+      }
+    },
+    {
+      "file": "time_gap_inf.yaml",
+      "category": "A",
+      "class": "time-gap-range",
+      "expected": {
+        "error_field": "time_gap_seconds",
+        "runtime": {
+          "completes": true,
+          "task_boundary_flag": false,
+          "high_consequence_flag": false
+        }
+      }
+    },
+    {
+      "file": "time_gap_bool.yaml",
+      "category": "A",
+      "class": "time-gap-range",
+      "expected": {
+        "error_field": "time_gap_seconds",
+        "runtime": {
+          "completes": true,
+          "task_boundary_flag": false,
+          "high_consequence_flag": false
+        }
+      }
+    },
+    {
+      "file": "dir_depth_zero.yaml",
+      "category": "A",
+      "class": "dir-depth-range",
+      "expected": {
+        "error_field": "dir_change_depth",
+        "runtime": {
+          "completes": true,
+          "task_boundary_flag": true,
+          "high_consequence_flag": false
+        }
+      }
+    },
+    {
+      "file": "dir_depth_negative.yaml",
+      "category": "A",
+      "class": "dir-depth-range",
+      "expected": {
+        "error_field": "dir_change_depth",
+        "runtime": {
+          "completes": true,
+          "task_boundary_flag": true,
+          "high_consequence_flag": false
+        }
+      }
+    },
+    {
+      "file": "dir_depth_bool.yaml",
+      "category": "A",
+      "class": "dir-depth-range",
+      "expected": {
+        "error_field": "dir_change_depth",
+        "runtime": {
+          "completes": true,
+          "task_boundary_flag": true,
+          "high_consequence_flag": false
+        }
+      }
+    },
+    {
+      "file": "schema_version_bool.yaml",
+      "category": "A",
+      "class": "schema-version",
+      "expected": {
+        "error_field": "schema_version",
+        "runtime": {
+          "completes": true,
+          "task_boundary_flag": false,
+          "high_consequence_flag": false
+        },
+        "schema_version_recorded": null,
+        "direct_runtime": true
+      }
+    },
+    {
+      "file": "schema_version_float.yaml",
+      "category": "A",
+      "class": "schema-version",
+      "expected": {
+        "error_field": "schema_version",
+        "runtime": {
+          "completes": true,
+          "task_boundary_flag": false,
+          "high_consequence_flag": false
+        },
+        "schema_version_recorded": null,
+        "direct_runtime": true
+      }
+    },
+    {
+      "file": "signals_nonstring_elem.yaml",
+      "category": "A",
+      "class": "signals-entry-type",
+      "expected": {
+        "error_field": "task_boundary.signals",
+        "runtime": {
+          "completes": true,
+          "task_boundary_flag": true,
+          "high_consequence_flag": false
+        }
+      }
+    },
+    {
+      "file": "signals_int.yaml",
+      "category": "A",
+      "class": "signals-shape",
+      "expected": {
+        "error_field": "task_boundary.signals",
+        "runtime": {
+          "completes": true,
+          "task_boundary_flag": false,
+          "high_consequence_flag": false
+        }
+      }
+    },
+    {
+      "file": "signals_string.yaml",
+      "category": "A",
+      "class": "signals-shape",
+      "expected": {
+        "error_field": "task_boundary.signals",
+        "runtime": {
+          "completes": true,
+          "task_boundary_flag": false,
+          "high_consequence_flag": false
+        }
+      }
+    },
+    {
+      "file": "signals_dict.yaml",
+      "category": "A",
+      "class": "signals-shape",
+      "expected": {
+        "error_field": "task_boundary.signals",
+        "runtime": {
+          "completes": true,
+          "task_boundary_flag": false,
+          "high_consequence_flag": false
+        }
+      }
+    },
+    {
+      "file": "tools_string.yaml",
+      "category": "A",
+      "class": "tools-shape",
+      "expected": {
+        "error_field": "high_consequence.tools",
+        "runtime": {
+          "completes": true,
+          "task_boundary_flag": false,
+          "high_consequence_flag": false
+        }
+      }
+    },
+    {
+      "file": "tools_dict.yaml",
+      "category": "A",
+      "class": "tools-shape",
+      "expected": {
+        "error_field": "high_consequence.tools",
+        "runtime": {
+          "completes": true,
+          "task_boundary_flag": false,
+          "high_consequence_flag": false
+        }
+      }
+    },
+    {
+      "file": "operations_string.yaml",
+      "category": "A",
+      "class": "operations-shape",
+      "expected": {
+        "error_field": "high_consequence.operations",
+        "runtime": {
+          "completes": true,
+          "task_boundary_flag": false,
+          "high_consequence_flag": false
+        }
+      }
+    },
+    {
+      "file": "session_intent_pairs.yaml",
+      "category": "A",
+      "class": "section-type",
+      "expected": {
+        "error_field": "session_intent",
+        "runtime": {
+          "completes": true,
+          "task_boundary_flag": false,
+          "high_consequence_flag": false
+        },
+        "direct_runtime": true,
+        "pol001_on_write": true
+      }
+    },
+    {
+      "file": "task_boundary_omap.yaml",
+      "category": "A",
+      "class": "section-type",
+      "expected": {
+        "error_field": "task_boundary",
+        "runtime": {
+          "completes": true,
+          "task_boundary_flag": false,
+          "high_consequence_flag": false
+        }
+      }
+    },
+    {
+      "file": "demand_at_int.yaml",
+      "category": "B",
+      "class": "unknown-value",
+      "expected": {
+        "errors": 0,
+        "warning_substring": "demand_at",
+        "resolution": "bound",
+        "runtime": {
+          "completes": true
+        }
+      }
+    },
+    {
+      "file": "demand_at_unknown_string.yaml",
+      "category": "B",
+      "class": "unknown-value",
+      "expected": {
+        "errors": 0,
+        "warning_substring": "demand_at",
+        "resolution": "bound",
+        "runtime": {
+          "completes": true
+        }
+      }
+    },
+    {
+      "file": "required_str.yaml",
+      "category": "B",
+      "class": "unknown-value",
+      "expected": {
+        "errors": 0,
+        "warning_substring": "required",
+        "resolution": "bound",
+        "runtime": {
+          "completes": true
+        }
+      }
+    },
+    {
+      "file": "unknown_signal_name.yaml",
+      "category": "B",
+      "class": "unknown-value",
+      "expected": {
+        "errors": 0,
+        "warning_substring": "signals",
+        "resolution": "bound",
+        "runtime": {
+          "completes": true
+        }
+      }
+    },
+    {
+      "file": "operations_ints.yaml",
+      "category": "B",
+      "class": "malformed-rule",
+      "expected": {
+        "errors": 0,
+        "warning_substring": "operations",
+        "resolution": "bound",
+        "runtime": {
+          "completes": true
+        }
+      }
+    },
+    {
+      "file": "operations_bad_members.yaml",
+      "category": "B",
+      "class": "malformed-rule",
+      "expected": {
+        "errors": 0,
+        "warning_substring": "operations",
+        "resolution": "bound",
+        "runtime": {
+          "completes": true
+        }
+      }
+    },
+    {
+      "file": "operations_empty_rule.yaml",
+      "category": "B",
+      "class": "malformed-rule",
+      "expected": {
+        "errors": 0,
+        "warning_substring": "operations",
+        "resolution": "bound",
+        "runtime": {
+          "completes": true
+        }
+      }
+    },
+    {
+      "file": "tools_bad_regex.yaml",
+      "category": "B",
+      "class": "bad-regex",
+      "expected": {
+        "errors": 0,
+        "warning_substring": "regular expression",
+        "resolution": "bound",
+        "runtime": {
+          "completes": true
+        }
+      }
+    },
+    {
+      "file": "unknown_top_level_key.yaml",
+      "category": "B",
+      "class": "unknown-key",
+      "expected": {
+        "errors": 0,
+        "warning_substring": "banana",
+        "resolution": "bound",
+        "runtime": {
+          "completes": true
+        }
+      }
+    },
+    {
+      "file": "reserved_key_extends.yaml",
+      "category": "B",
+      "class": "reserved-key",
+      "expected": {
+        "errors": 0,
+        "warning_substring": "extends",
+        "resolution": "bound",
+        "runtime": {
+          "completes": true
+        }
+      }
+    },
+    {
+      "file": "schema_version_mismatch.yaml",
+      "category": "B",
+      "class": "schema-version",
+      "expected": {
+        "errors": 0,
+        "warning_substring": "schema_version",
+        "resolution": "bound",
+        "runtime": {
+          "completes": true
+        }
+      }
+    },
+    {
+      "file": "on_match_unknown.yaml",
+      "category": "B",
+      "class": "unknown-value",
+      "expected": {
+        "errors": 0,
+        "warning_substring": "on_match",
+        "resolution": "bound",
+        "runtime": {
+          "completes": true
+        }
+      }
+    },
+    {
+      "file": "date_value_top.yaml",
+      "category": "F",
+      "class": "unserializable-value",
+      "expected": {
+        "construction_raises": "TypeError"
+      }
+    },
+    {
+      "file": "date_value_section.yaml",
+      "category": "F",
+      "class": "unserializable-value",
+      "expected": {
+        "construction_raises": "TypeError"
+      }
+    },
+    {
+      "file": "datetime_value.yaml",
+      "category": "F",
+      "class": "unserializable-value",
+      "expected": {
+        "construction_raises": "TypeError"
+      }
+    },
+    {
+      "file": "binary_value.yaml",
+      "category": "F",
+      "class": "unserializable-value",
+      "expected": {
+        "construction_raises": "TypeError"
+      }
+    },
+    {
+      "file": "binary_elem.yaml",
+      "category": "F",
+      "class": "unserializable-value",
+      "expected": {
+        "construction_raises": "TypeError"
+      }
+    },
+    {
+      "file": "set_value.yaml",
+      "category": "F",
+      "class": "unserializable-value",
+      "expected": {
+        "construction_raises": "TypeError"
+      }
+    },
+    {
+      "file": "set_top.yaml",
+      "category": "F",
+      "class": "unserializable-value",
+      "expected": {
+        "construction_raises": "TypeError"
+      }
+    },
+    {
+      "file": "date_key_section.yaml",
+      "category": "F",
+      "class": "non-string-key",
+      "expected": {
+        "construction_raises": "ValueError"
+      }
+    },
+    {
+      "file": "int_key_section.yaml",
+      "category": "F",
+      "class": "non-string-key",
+      "expected": {
+        "construction_raises": "ValueError"
+      }
+    },
+    {
+      "file": "int_keys_only_section.yaml",
+      "category": "F",
+      "class": "non-string-key",
+      "expected": {
+        "construction_raises": "ValueError"
+      }
+    },
+    {
+      "file": "bool_key_section.yaml",
+      "category": "F",
+      "class": "non-string-key",
+      "expected": {
+        "construction_raises": "ValueError"
+      }
+    },
+    {
+      "file": "null_key_section.yaml",
+      "category": "F",
+      "class": "non-string-key",
+      "expected": {
+        "construction_raises": "ValueError"
+      }
+    },
+    {
+      "file": "float_key_section.yaml",
+      "category": "F",
+      "class": "non-string-key",
+      "expected": {
+        "construction_raises": "ValueError"
+      }
+    },
+    {
+      "file": "int_key_top.yaml",
+      "category": "F",
+      "class": "non-string-key",
+      "expected": {
+        "construction_raises": "ValueError"
+      }
+    },
+    {
+      "file": "mixed_keys_top.yaml",
+      "category": "F",
+      "class": "non-string-key",
+      "expected": {
+        "construction_raises": "ValueError"
+      }
+    },
+    {
+      "file": "int_key_operations_rule.yaml",
+      "category": "F",
+      "class": "non-string-key",
+      "expected": {
+        "construction_raises": "ValueError"
+      }
+    }
+  ]
+}

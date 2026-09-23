@@ -6,6 +6,37 @@ Breaking changes bump the minor version until 1.0. After 1.0, breaking changes b
 
 ---
 
+## 0.3.2.1 — 2026-09-22
+
+**A profile that parses but is not valid no longer raises inside the
+governed run.** Validation now covers every field the runtime consumes:
+`schema_version` must be an integer, `task_boundary.signals` and
+`high_consequence.tools` must be lists of strings, `time_gap_seconds` must
+be a finite number of at least 0, `dir_change_depth` an integer of at least
+1, each section a mapping, and every key a string. `sentience profile
+validate` reports each as an error; a `tools` pattern that does not compile
+is a warning.
+
+A profile with an error is never bound. Bound to it, a session resolves
+`degraded` and runs on the machine default, with a warning naming the file
+and the errors and no later binding consulted. As the machine default, the
+session runs without a profile and the registration records that; in 0.3.2
+an unparseable default raised into the MCP wrapper's `async with` and left
+a LangChain run silently ungoverned, and both now continue with the warning
+and the record. Passed directly to a session, it is refused with one
+warning. A Claude Code snapshot from an earlier release that rebuilds into
+an invalid profile is set aside and the hook resolves again. Should a
+malformed value still reach the runtime, the consumer substitutes the
+validator's default and logs the field once per session; an invalid time
+gap detects no boundary, while a valid `dir_change` next to an invalid
+depth still does.
+
+Nothing else changes: valid profiles keep their fingerprint, snapshots and
+outcomes; no event type, flag or field is added; nothing is blocked. Fixes
+issue #19.
+
+---
+
 ## 0.3.2 — 2026-09-15
 
 **Which policy governs this session, what the agent is actually doing, and

@@ -27,6 +27,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -304,6 +306,15 @@ class GovernanceProfile:
         *,
         source_path: Optional[Path] = None,
     ) -> None:
+        # v0.3.2.1: admissible representation. Every mapping key must be a
+        # string before the JSON round trip below, which would otherwise
+        # coerce integer, boolean and null keys to strings silently (and
+        # raise TypeError for date keys). Keys unknown to every consumer
+        # were never legitimate; rejecting them here, in the one place all
+        # construction paths pass, is the whole of the check. Profiles with
+        # string keys are untouched, so canonical bytes and fingerprints are
+        # unchanged.
+        _reject_non_string_keys(data, "<root>")
         # Store a deep copy so external callers cannot mutate
         # profile state after construction.
         self._data = json.loads(json.dumps(data))
@@ -511,6 +522,14 @@ class GovernanceProfile:
                 "Missing 'schema_version' header field; defaulting to "
                 f"{SCHEMA_VERSION}."
             )
+        elif isinstance(sv, bool) or not isinstance(sv, int):
+            # v0.3.2.1: the runtime applies int() to this value, so a
+            # non-integer is a runtime hazard, not a preference. Booleans
+            # are integers to Python and are excluded explicitly.
+            errors.append(
+                f"'schema_version' must be an integer; got "
+                f"{type(sv).__name__}."
+            )
         elif sv != SCHEMA_VERSION:
             warnings.append(
                 f"schema_version={sv} does not match runtime schema "
@@ -587,7 +606,14 @@ class GovernanceProfile:
                         f"list; got {type(signals).__name__}."
                     )
                 else:
-                    for sig in signals:
+                    for index, sig in enumerate(signals):
+                        if not isinstance(sig, str):
+                            errors.append(
+                                f"'{SECTION_TASK_BOUNDARY}.signals' entries "
+                                f"must be strings; entry {index} is "
+                                f"{type(sig).__name__}."
+                            )
+                            continue
                         if sig not in VALID_SIGNAL_VALUES:
                             msg = (
                                 f"'{SECTION_TASK_BOUNDARY}.signals' "
@@ -600,6 +626,20 @@ class GovernanceProfile:
                                 errors.append(msg)
                             else:
                                 warnings.append(msg)
+                self._validate_numeric_parameter(
+                    tb.get("time_gap_seconds"),
+                    field=f"'{SECTION_TASK_BOUNDARY}.time_gap_seconds'",
+                    integer_only=False,
+                    minimum=0,
+                    errors=errors,
+                )
+                self._validate_numeric_parameter(
+                    tb.get("dir_change_depth"),
+                    field=f"'{SECTION_TASK_BOUNDARY}.dir_change_depth'",
+                    integer_only=True,
+                    minimum=1,
+                    errors=errors,
+                )
                 self._validate_on_match(
                     tb.get("on_match"),
                     section_name=SECTION_TASK_BOUNDARY,
@@ -623,6 +663,27 @@ class GovernanceProfile:
                         f"'{SECTION_HIGH_CONSEQUENCE}.tools' must be a "
                         f"list; got {type(tools).__name__}."
                     )
+                else:
+                    for index, pattern in enumerate(tools):
+                        if not isinstance(pattern, str):
+                            # v0.3.2.1: each entry reaches re.search at
+                            # runtime; a non-string raises there.
+                            errors.append(
+                                f"'{SECTION_HIGH_CONSEQUENCE}.tools' entries "
+                                f"must be strings; entry {index} is "
+                                f"{type(pattern).__name__}."
+                            )
+                            continue
+                        try:
+                            re.compile(pattern)
+                        except re.error as exc:
+                            # The runtime already skips a pattern that does
+                            # not compile; until v0.3.2.1 it did so silently.
+                            warnings.append(
+                                f"'{SECTION_HIGH_CONSEQUENCE}.tools' entry "
+                                f"{index} is not a valid regular expression: "
+                                f"{exc}."
+                            )
                 self._validate_operations(
                     hc.get("operations"),
                     errors=errors,
@@ -644,6 +705,44 @@ class GovernanceProfile:
             warnings=warnings,
             strict=strict,
         )
+
+    @staticmethod
+    def _validate_numeric_parameter(
+        value: Any,
+        *,
+        field: str,
+        integer_only: bool,
+        minimum: int,
+        errors: List[str],
+    ) -> None:
+        """Validate a runtime-consumed numeric parameter (v0.3.2.1).
+
+        The runtime compares ``time_gap_seconds`` with ``>=`` and uses
+        ``dir_change_depth`` as a slice bound, so each must be a real
+        number of the right kind, finite, and within range. Booleans are
+        rejected explicitly (``True`` would otherwise pass as ``1``).
+        ``None`` means absent and is not checked here; defaults apply.
+        """
+        if value is None:
+            return
+        if isinstance(value, bool):
+            errors.append(f"{field} must be a number; got bool.")
+            return
+        if integer_only:
+            if not isinstance(value, int):
+                errors.append(
+                    f"{field} must be a positive integer; got "
+                    f"{type(value).__name__}."
+                )
+                return
+        elif not isinstance(value, (int, float)):
+            errors.append(f"{field} must be a number; got {type(value).__name__}.")
+            return
+        if isinstance(value, float) and not math.isfinite(value):
+            errors.append(f"{field} must be finite; got {value!r}.")
+            return
+        if value < minimum:
+            errors.append(f"{field} must be at least {minimum}; got {value!r}.")
 
     @staticmethod
     def _validate_operations(
@@ -857,6 +956,37 @@ def _canonical_operation_rules(rules: List[Any]) -> List[Any]:
                     ]
         serialized.add(json.dumps(rule, sort_keys=True, separators=(",", ":")))
     return [json.loads(s) for s in sorted(serialized)]
+
+
+def _reject_non_string_keys(value: Any, path: str) -> None:
+    """Raise ``ValueError`` naming the key path for any non-string mapping key.
+
+    Walks mappings and sequences; scalars are not inspected (value types are
+    the JSON round trip's concern, which raises ``TypeError`` for dates,
+    bytes and sets exactly as before).
+    """
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if not isinstance(key, str):
+                raise ValueError(
+                    f"Profile mapping keys must be strings; got "
+                    f"{type(key).__name__} key {key!r} at {path}."
+                )
+            _reject_non_string_keys(child, f"{path}.{key}" if path != "<root>" else key)
+    elif isinstance(value, (list, tuple)):
+        for index, child in enumerate(value):
+            _reject_non_string_keys(child, f"{path}[{index}]")
+
+
+def _runtime_readiness(profile: "GovernanceProfile") -> ProfileValidationResult:
+    """The single readiness decision for binding a profile at runtime (v0.3.2.1).
+
+    Internal. Returns ``profile.validate(strict=False)``; callers on the binding
+    path (resolver, session start, snapshot rehydration) treat ``errors`` as
+    "unusable". It adds no rules of its own: ``validate()`` is the one
+    definition of an invalid profile. Not part of the public API.
+    """
+    return profile.validate(strict=False)
 
 
 def _merge_with_defaults(loaded: Dict[str, Any]) -> Dict[str, Any]:
