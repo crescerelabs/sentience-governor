@@ -9,7 +9,7 @@ and this distribution adheres to [Semantic Versioning](https://semver.org/).
 versions and releases on its own series, keeps its own changelog, and its
 releases do not appear here.
 
-## [0.1.1] — unreleased
+## [0.1.1] — 2026-09-23
 
 **Which profile governs this run.** Until now every run under this
 capability used the one machine default profile, if any. Each run now
