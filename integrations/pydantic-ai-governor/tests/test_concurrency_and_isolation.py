@@ -290,6 +290,11 @@ def test_no_per_call_attribute_is_declared_in_the_constructor():
     assert set(vars(instance)) == {
         "_agent_id", "_default", "_session_manager", "_cache",
         "_session_id", "_builder", "_sink", "_declaration", "_rejection",
+        # 0.1.1: the one resolution problem to report at session open.
+        # Per-RUN state (reset in `for_run`, consumed before the first tool
+        # call), not per-call; the run-time watcher above proves it holds
+        # still across parallel calls.
+        "_resolution_warning",
     }
 
 

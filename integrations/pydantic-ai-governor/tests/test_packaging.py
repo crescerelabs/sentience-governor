@@ -78,7 +78,7 @@ def test_dependency_bounds_are_the_locked_ones():
     """The bounds are published compatibility contracts. Widening them is a
     deliberate act in a new release, never an edit in place."""
     deps = _pyproject()["project"]["dependencies"]
-    assert "sentience-governor>=0.3.1.2,<0.3.2" in deps
+    assert "sentience-governor>=0.3.2.1,<0.3.3" in deps
     assert "pydantic-ai-slim>=2.37.0,<2.38" in deps
 
 
