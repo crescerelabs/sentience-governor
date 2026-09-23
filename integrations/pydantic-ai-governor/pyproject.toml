@@ -38,7 +38,8 @@ classifiers = [
 #
 #  * sentience-governor: a wider ceiling would let a future core release
 #    change this distribution's observable behavior without a new release
-#    of it. 0.3.1.2 is the measured version.
+#    of it. 0.3.2.1 is the measured version: the first core whose validator
+#    and runtime never let a parseable but invalid profile raise into a run.
 #  * pydantic-ai-slim: 2.37.0 is the only tested version. A lower floor
 #    would install releases whose capability API differs; a higher ceiling
 #    would assert compatibility with releases that do not exist yet.
@@ -46,7 +47,7 @@ classifiers = [
 # Widen only after measured verification, and only in a new release of this
 # distribution. Never relax a bound in place.
 dependencies = [
-    "sentience-governor>=0.3.2,<0.3.3",
+    "sentience-governor>=0.3.2.1,<0.3.3",
     "pydantic-ai-slim>=2.37.0,<2.38",
 ]
 

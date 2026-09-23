@@ -350,8 +350,10 @@ async def test_concurrent_runs_on_one_agent_share_one_resolution(isolated_home, 
 # ---------------------------------------------------------------------------
 
 async def test_malformed_default_profile_warns_once_and_runs_with_no_profile(isolated_home, config, capsys):
-    # Unparseable YAML: the loader raises ValueError from the default step
-    # (core preserves that deliberately); the companion must catch it.
+    # Unparseable YAML. Since core 0.3.2.1 the resolver's default step no
+    # longer raises: it resolves `none` with a warning naming the file, and
+    # the companion reports that warning once at session open. The run
+    # completes with no profile either way.
     config.set_default("schema_version: 1\nsession_intent: [\n")
     result, warned = await run(gov(), model=one_call_model(), tools=[Tool(crm_fetch)])
     assert result.output == "done"
@@ -360,9 +362,71 @@ async def test_malformed_default_profile_warns_once_and_runs_with_no_profile(iso
     assert all("profile_fingerprint" not in e for e in evs)
     reg = registration(evs)["payload"]
     assert "profile_resolution" not in reg and "profile_binding" not in reg
-    assert len(warned) == 1 and "could not resolve" in str(warned[0].message)
+    assert len(warned) == 1
+    message = str(warned[0].message)
+    assert "with a problem" in message and "could not be loaded" in message and "profile.yaml" in message
     errors = governance_errors(capsys)
-    assert len(errors) == 1 and errors[0]["payload"]["failure_reason"].startswith("profile resolution failed")
+    assert len(errors) == 1 and errors[0]["payload"]["failure_reason"].startswith("profile resolution none:")
+
+
+async def test_invalid_default_profile_resolves_to_no_profile_with_one_warning(isolated_home, config, capsys):
+    # Parseable but not valid (core issue #19). Core 0.3.2.1 refuses it at
+    # the default step; the companion surfaces the one warning and runs on.
+    config.set_default("schema_version: 1\nhigh_consequence:\n  tools: [1, 2]\n")
+    result, warned = await run(gov(), model=one_call_model(), tools=[Tool(crm_fetch)])
+    assert result.output == "done"
+    evs = events(isolated_home, result.run_id)
+    assert len(of_type(evs, "SCOPE_ASSERTED")) == 1
+    assert all("profile_fingerprint" not in e for e in evs)
+    reg = registration(evs)["payload"]
+    assert "profile_resolution" not in reg and "profile_binding" not in reg
+    assert len(warned) == 1
+    message = str(warned[0].message)
+    assert "not runtime-ready" in message and "high_consequence.tools" in message
+    errors = governance_errors(capsys)
+    assert len(errors) == 1 and errors[0]["payload"]["failure_reason"].startswith("profile resolution none:")
+
+
+async def test_invalid_bound_profile_degrades_to_the_default_with_one_warning(isolated_home, config, capsys):
+    # A matched binding whose file parses but is invalid: degraded to the
+    # machine default, exactly like a missing file; no later binding.
+    bad = config.profile("bad.yaml", "schema_version: 1\nhigh_consequence:\n  tools: [1, 2]\n")
+    d = config.set_default(PROFILE_D)
+    config.bind(("pydantic-*", "profiles/bad.yaml"), ("deploy-*", "profiles/bad.yaml"))
+    result, warned = await run(gov(), model=one_call_model(), tools=[Tool(crm_fetch)])
+    assert result.output == "done"
+    evs = events(isolated_home, result.run_id)
+    assert fingerprints(evs) == {Config.fingerprint(d)}
+    reg = registration(evs)["payload"]
+    assert reg["profile_resolution"] == "degraded" and reg["profile_binding"] == "pydantic-*"
+    assert len(warned) == 1 and "not runtime-ready" in str(warned[0].message) and bad.name in str(warned[0].message)
+    errors = governance_errors(capsys)
+    assert len(errors) == 1 and errors[0]["payload"]["failure_reason"].startswith("profile resolution degraded:")
+
+
+async def test_a_profile_core_hands_back_that_fails_validation_is_not_bound(isolated_home, config, capsys, monkeypatch):
+    # The companion's own readiness belt: if a resolver ever returned a
+    # profile that core's validate() rejects, the session opens with no
+    # profile, provenance stays truthful, and one warning says why.
+    import pydantic_ai_governor.capability as cap
+    from sentience_governor.profile.resolver import ResolvedProfile
+
+    invalid = GovernanceProfile({"schema_version": 1, "high_consequence": {"tools": [1, 2]}})
+    monkeypatch.setattr(
+        cap, "resolve_profile",
+        lambda **kwargs: ResolvedProfile(profile=invalid, source="bound", binding="pydantic-*", warnings=()),
+    )
+    result, warned = await run(gov(), model=one_call_model(), tools=[Tool(crm_fetch)])
+    assert result.output == "done"
+    evs = events(isolated_home, result.run_id)
+    assert len(of_type(evs, "SCOPE_ASSERTED")) == 1
+    assert all("profile_fingerprint" not in e for e in evs)
+    reg = registration(evs)["payload"]
+    assert "profile_loaded" not in reg
+    assert reg["profile_resolution"] == "degraded" and reg["profile_binding"] == "pydantic-*"
+    assert len(warned) == 1 and "is not valid" in str(warned[0].message) and "high_consequence.tools" in str(warned[0].message)
+    errors = governance_errors(capsys)
+    assert len(errors) == 1 and errors[0]["payload"]["failure_reason"].startswith("profile resolution degraded:")
 
 
 async def test_malformed_resolution_file_warns_and_the_default_applies(isolated_home, config, capsys):

@@ -19,8 +19,9 @@ from pydantic_ai.capabilities import AbstractCapability
 from sentience_governor.cache.cache import InProcessCache
 from sentience_governor.event_builder.builder import EventBuilder
 from sentience_governor.profile.resolver import (
-    SOURCE_NONE,
     ResolvedProfile,
+    SOURCE_DEGRADED,
+    SOURCE_NONE,
     resolve_profile,
 )
 from sentience_governor.schema.events import (
@@ -371,16 +372,22 @@ class SentienceGovernor(AbstractCapability[Any]):
         never a later binding; no match uses the default when present,
         otherwise no profile. The companion adds no precedence step.
 
-        Core's default step deliberately keeps the loader's behaviour of
-        raising on a malformed or unreadable default profile. An operator's
-        broken file must not break a developer's agent run, so that one
-        case is caught here and the session opens with no profile. Every
-        problem, caught or reported by the resolver, is surfaced once, when
-        the session opens, through `_report_resolution`.
+        Since core 0.3.2.1 the resolver never raises and never returns a
+        profile its validator rejects: a malformed or unreadable default
+        resolves to no profile with a warning, and an invalid bound file
+        degrades to the default. The `except` below stays as the guard the
+        companion promised in 0.1.0 (nothing raises into a developer's run),
+        and the readiness check after it is the companion's own belt: the
+        profile core hands back must expose its sections and fingerprint
+        and pass core's `validate()` with no errors, or the session opens
+        with no profile. Core's API is the only judge of validity here; the
+        companion encodes no schema facts. Every problem, caught or reported
+        by the resolver, is surfaced once, when the session opens, through
+        `_report_resolution`.
         """
         try:
             resolved = resolve_profile(agent_id=self._agent_id)
-        except Exception as exc:  # the default step may raise; see above
+        except Exception as exc:  # the guard the 0.1.0 contract promised
             detail = f"{exc.__class__.__name__}: {exc}"
             self._resolution_warning = (
                 f"Sentience Governor could not resolve a governance profile "
@@ -391,6 +398,22 @@ class SentienceGovernor(AbstractCapability[Any]):
             return ResolvedProfile(
                 profile=None, source=SOURCE_NONE, binding=None, warnings=(detail,)
             )
+        unusable = self._profile_unusable_reason(resolved.profile)
+        if unusable is not None:
+            source = SOURCE_DEGRADED if resolved.binding is not None else SOURCE_NONE
+            problems = " ".join((*resolved.warnings, unusable))
+            self._resolution_warning = (
+                f"Sentience Governor resolved the governance profile for agent "
+                f"'{self._agent_id}' with a problem: {problems} This run "
+                f"continues with no profile.",
+                f"profile resolution {source}: {problems}",
+            )
+            return ResolvedProfile(
+                profile=None,
+                source=source,
+                binding=resolved.binding,
+                warnings=(*resolved.warnings, unusable),
+            )
         if resolved.warnings:
             problems = " ".join(resolved.warnings)
             self._resolution_warning = (
@@ -399,6 +422,33 @@ class SentienceGovernor(AbstractCapability[Any]):
                 f"profile resolution {resolved.source}: {problems}",
             )
         return resolved
+
+    @staticmethod
+    def _profile_unusable_reason(profile: Any) -> Optional[str]:
+        """Why a resolved profile must not be bound, or ``None`` if it may.
+
+        Exercises exactly what core's runtime reads (the four section and
+        version accessors and the fingerprint) and asks core's own
+        ``validate()``; errors, or an accessor that raises, make the profile
+        unusable. Nothing here re-implements the schema: core decides.
+        """
+        if profile is None:
+            return None
+        try:
+            for attr in ("schema_version", "session_intent", "task_boundary", "high_consequence"):
+                getattr(profile, attr)
+            profile.fingerprint()
+            result = profile.validate(strict=False)
+        except Exception as exc:  # an accessor or validate() raised
+            return (
+                f"the resolved profile could not be read "
+                f"({exc.__class__.__name__}: {exc}); it is not used."
+            )
+        errors = list(getattr(result, "errors", ()) or ())
+        if errors:
+            shown = "; ".join(errors[:3]) + (f"; and {len(errors) - 3} more" if len(errors) > 3 else "")
+            return f"the resolved profile is not valid ({shown}); it is not used."
+        return None
 
     def _report_resolution(self) -> None:
         """Visible fail-open for a resolution problem: once per session open.

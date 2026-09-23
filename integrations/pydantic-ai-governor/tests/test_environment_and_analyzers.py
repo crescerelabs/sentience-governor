@@ -147,7 +147,7 @@ def test_the_minimum_supported_pydantic_ai_still_carries_the_hooks_we_use():
 
 
 def test_installed_governor_core_is_inside_the_declared_range():
-    spec = SpecifierSet(">=0.3.2,<0.3.3")
+    spec = SpecifierSet(">=0.3.2.1,<0.3.3")
     found = Version(installed_version("sentience-governor"))
     assert found in spec, f"sentience-governor {found} is outside {spec}"
 

@@ -93,7 +93,7 @@ def test_core_metadata_names_no_pydantic_dependency():
 def test_our_metadata_names_core_at_the_locked_bound():
     with (PKG / "pyproject.toml").open("rb") as fh:
         deps = " ".join(tomllib.load(fh)["project"]["dependencies"])
-    assert "sentience-governor>=0.3.2,<0.3.3" in deps
+    assert "sentience-governor>=0.3.2.1,<0.3.3" in deps
     assert "pydantic-ai-slim>=2.37.0,<2.38" in deps
 
 
