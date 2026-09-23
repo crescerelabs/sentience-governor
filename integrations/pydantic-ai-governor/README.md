@@ -23,16 +23,22 @@ your machine.
 
 ## What's new
 
-**0.1.0** is the first release of this distribution. It adds a Pydantic AI
-capability that records what an agent dispatched at runtime against the
-declaration state recorded before the run, which may be an objective and
-scope or the absence of a valid declaration: a session per run, an assertion
-before each tool is dispatched, a snapshot after each normal return, and
-per-turn token usage read from the model response. Declaring a run's
-objective is one metadata block; classifying a tool is one more. Nothing is
-inferred from a tool's name. Non-interference was verified across the tested
-execution paths for this release; see
-[Observation and non-interference](#observation-and-non-interference).
+**0.1.1** resolves, for each run, the governance profile the operator
+intended for that agent. With a `~/.sentience/resolution.yaml` the first
+`agent_id` pattern that matches is authoritative; with none, the machine
+default applies; with neither, the run proceeds with no profile, exactly as
+0.1.0 did. Resolution happens once at session open and is recorded on the
+registration (`bound` or `degraded`, with the matched pattern), and every
+event of a governed run carries the profile's fingerprint. A bound profile
+shapes what is evaluated: `demand_at` gating of the undeclared-scope
+violation, task-boundary signals over the declared targets, and
+`high_consequence.tools` patterns over `<tool name>:<target_system>`.
+Operations rules do not apply to Pydantic AI tool calls, which carry no Bash
+operation classification. A broken profile never interrupts a run: a matched
+binding whose file is missing, unparseable or not valid degrades to the
+default, a broken default leaves the run on no profile, and either case is
+one warning at session open. Requires core Sentience Governor 0.3.2.1 or
+later. See [Which profile governs a run](#which-profile-governs-a-run).
 
 This README lists releases of `pydantic-ai-governor` only.
 `sentience-governor` is versioned and released separately, and its releases
@@ -435,14 +441,17 @@ flow of any kind.
 
 | Requires | Range |
 | :-- | :-- |
-| `sentience-governor` | `>=0.3.1.2,<0.3.2` |
+| `sentience-governor` | `>=0.3.2.1,<0.3.3` |
 | `pydantic-ai-slim` | `>=2.37.0,<2.38` |
 | Python | `>=3.10` |
 
 These bounds are deliberate published compatibility contracts rather than
-defaults, and both ceilings are narrow on purpose. A wider `sentience-governor`
-ceiling would let a future core release change this distribution's observable
-behavior without a new release of it. A wider `pydantic-ai-slim` ceiling would
+defaults, and both ceilings are narrow on purpose. The `sentience-governor`
+floor is 0.3.2.1, the first core release whose profile validation covers
+every field the runtime reads and whose resolver never raises into a run;
+per-agent resolution in this release is validated against it. A wider
+`sentience-governor` ceiling would let a future core release change this
+distribution's observable behavior without a new release of it. A wider `pydantic-ai-slim` ceiling would
 assert compatibility with releases this integration has not yet verified,
 including ones published after this release.
 
@@ -476,6 +485,16 @@ does not require rebuilding, versioning, tagging or republishing the other.
 `pydantic-ai-governor` is a distribution name following the ecosystem's
 `pydantic-ai-<name>` convention. It does not imply that Pydantic owns,
 operates or endorses Sentience Governor.
+
+Where the pieces live: the core package is
+[`sentience-governor` on PyPI](https://pypi.org/project/sentience-governor/),
+with its documentation, changelog and the other integrations (Claude Code,
+MCP clients, LangChain) in the
+[repository](https://github.com/crescerelabs/sentience-governor); this
+distribution's source is in that repository under
+`integrations/pydantic-ai-governor`. The product, its positioning and
+Governor's Log are at [getsentience.ai](https://getsentience.ai), which
+remains the destination for everything that is not a package page.
 
 ## Governor's Log
 
