@@ -113,3 +113,35 @@ class TestCLIRobustness:
         assert result.returncode == 0
         assert "SESSION:" in result.stdout
         assert "WARNING: skipping malformed JSON" in result.stderr
+
+    @pytest.mark.parametrize("line", ["[]", "null", "123", '"a string"', "true"])
+    def test_parse_events_skips_valid_json_that_is_not_an_object(self, line, capsys):
+        """A line that parses as JSON but is not an object is not an event.
+
+        It is skipped with a warning, like an undecodable line, instead of
+        raising AttributeError out of every command that reads the trace.
+        """
+        import io
+        import json
+        from sentience_governor.cli.viewer import parse_events
+
+        event = {"event_id": "e1", "event_type": "AGENT_REGISTERED", "session_id": "s1"}
+        source = io.StringIO(json.dumps(event) + "\n" + line + "\n" + json.dumps(event) + "\n")
+
+        sessions = parse_events(source)
+
+        assert sessions == {"s1": [event, event]}
+        assert "WARNING: skipping non-object JSON on line 2" in capsys.readouterr().err
+
+    def test_skip_non_object_json_lines(self, tmp_path):
+        """End to end through `sentience-cli`, with the repository's own
+        malformed fixture (its line 2 is a JSON string, not an object)."""
+        fixture = FIXTURES / "burn_rate" / "malformed_events.jsonl"
+        result = subprocess.run(
+            [sys.executable, "-m", "sentience_governor.cli.viewer", str(fixture), "--no-colour"],
+            capture_output=True, text=True,
+        )
+        assert result.returncode == 0, result.stderr
+        assert "Traceback" not in result.stderr
+        assert "SESSION:" in result.stdout
+        assert "WARNING: skipping non-object JSON on line 2" in result.stderr

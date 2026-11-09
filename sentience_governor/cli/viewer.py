@@ -311,6 +311,15 @@ def parse_events(source: TextIO) -> Dict[str, List[dict]]:
                 file=sys.stderr,
             )
             continue
+        if not isinstance(event, dict):
+            # Valid JSON but not an event object (e.g. `[]`, `null`, a bare
+            # string). Skip it like an undecodable line; the array branch
+            # above already drops non-dict members the same way.
+            print(
+                f"WARNING: skipping non-object JSON on line {lineno}",
+                file=sys.stderr,
+            )
+            continue
         session_id = event.get("session_id", "__unknown__")
         sessions[session_id].append(event)
 

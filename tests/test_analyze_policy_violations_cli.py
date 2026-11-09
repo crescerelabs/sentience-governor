@@ -531,6 +531,19 @@ class TestNonEligibleSaveBehavior:
 
 
 class TestTraceResolutionErrors:
+    def test_malformed_events_fixture_is_analyzed_not_crashed(self, capsys):
+        """The analyzer's own malformed fixture (a JSON-string line and an
+        event without event_type) must reach the analyzer through the CLI
+        loader and come back as a partial result, not an AttributeError."""
+        fixture = (
+            Path(__file__).parent / "fixtures" / "burn_rate" / "malformed_events.jsonl"
+        )
+        args = _make_args(target=str(fixture), json=True)
+        rc = cli_ux.run_analyze_policy_violations(args)
+        assert rc == 0
+        parsed = json.loads(capsys.readouterr().out)
+        assert parsed["status"] == "partial"
+
     def test_file_not_found(self, tmp_path, capsys):
         args = _make_args(target=str(tmp_path / "missing.jsonl"))
         rc = cli_ux.run_analyze_policy_violations(args)
