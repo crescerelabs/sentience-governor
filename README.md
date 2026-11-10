@@ -10,6 +10,10 @@ When an agent operates outside what it declared, Sentience Governor surfaces the
 policy violation and attributes the associated token usage to the turn where it
 happened.
 
+Need actions blocked or corrected at runtime?
+[Sentience Runtime Enforcement](https://getsentience.ai/runtime-enforcement) adds
+policy-driven intervention as a commercial offering.
+
 [![PyPI](https://img.shields.io/pypi/v/sentience-governor.svg)](https://pypi.org/project/sentience-governor/)
 [![Python](https://img.shields.io/pypi/pyversions/sentience-governor.svg)](https://pypi.org/project/sentience-governor/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://github.com/crescerelabs/sentience-governor/blob/main/LICENSE)
@@ -150,6 +154,10 @@ questions. Sentience Governor works at the third.
 | Model-layer safety | The content a model produces: bias, toxicity, hallucination | What the agent then did with it |
 | Application logging | That a tool call happened, with its arguments | Whether the call matched what the agent declared |
 | **Execution-boundary governance** | **The action against the declared intent, scope, and policy** | **Whether the declaration itself was truthful** |
+
+For a fuller treatment of how runtime governance relates to guardrails and
+observability, see
+[Runtime governance vs. guardrails vs. observability](https://getsentience.ai/compare/runtime-governance-vs-guardrails-vs-observability).
 
 ### What the record is
 
@@ -383,8 +391,11 @@ Governance tooling that oversells itself is worse than none, so:
 - **Attribution stops at the turn.** The model meters tokens per turn, not per
   tool. Every number is "tokens on turns involving tool X," never per-tool
   guesswork. `sentience explain` spells out the counting rules.
-- **The current open-source release does not block.** It records and reports
-  violations but does not stop or modify agent actions.
+- **The open-source release does not block.** It records and reports
+  violations but does not stop or modify agent actions. Policy-driven
+  intervention and course correction are available today as
+  [Sentience Runtime Enforcement](https://getsentience.ai/runtime-enforcement),
+  a separate commercial offering, custom-configured per team.
 - **Coverage differs by harness.** See the support column above.
 
 ---
