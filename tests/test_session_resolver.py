@@ -121,6 +121,30 @@ def test_malformed_first_event_falls_back_to_mtime(tmp_path):
     assert ordered[0].stem == "bad"
 
 
+@pytest.mark.parametrize("first_line", ["[]", "null", "123", '"text"'])
+def test_non_object_first_line_falls_back_to_mtime(tmp_path, first_line):
+    """A first line that is valid JSON but not an object orders by mtime.
+
+    It used to raise AttributeError from ``.get()`` and crash ``list``,
+    ``open --latest`` and ``analyze --latest`` for every session in the
+    directory.
+    """
+    trace_dir = tmp_path / "tr"
+    trace_dir.mkdir()
+    odd = trace_dir / "odd.jsonl"
+    odd.write_text(
+        first_line + "\n" + json.dumps(_event(1, "odd", "2026-05-21T08:00:00.000Z")) + "\n",
+        encoding="utf-8",
+    )
+    os.utime(odd, (2_000_000_000, 2_000_000_000))  # ~year 2033
+    _write_session(trace_dir, "good", "2026-05-21T08:00:00.000Z",
+                   mtime=1_700_000_000)
+
+    assert ux._session_start_epoch(odd) is None
+    ordered = _list_session_files(trace_dir)
+    assert [f.stem for f in ordered] == ["odd", "good"]
+
+
 # ---------------------------------------------------------------------------
 # F-V10 — open accepts file paths like analyze
 # ---------------------------------------------------------------------------
