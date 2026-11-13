@@ -390,6 +390,20 @@ class SentienceCallbackHandler:
             del self._roots[key]
             self._prune_ancestry(key)
 
+    def _ignore_callback(self, *args: Any, **kwargs: Any) -> None:
+        """Accept a LangChain callback this handler does not use.
+
+        ``BaseCallbackHandler`` defines every callback as a no-op; without
+        these the manager logs an ``AttributeError`` for each call (one per
+        streamed token for ``on_llm_new_token``).
+        """
+
+    on_llm_new_token = on_llm_error = _ignore_callback
+    on_chain_error = on_tool_error = on_text = on_retry = _ignore_callback
+    on_agent_action = on_agent_finish = _ignore_callback
+    on_retriever_start = on_retriever_end = on_retriever_error = _ignore_callback
+    on_custom_event = on_stream_event = _ignore_callback
+
     def on_chat_model_start(
         self,
         serialized: Dict[str, Any],

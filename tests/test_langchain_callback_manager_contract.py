@@ -109,3 +109,12 @@ def test_plain_handler_governs_a_real_langchain_runnable():
     assert kinds.count("AGENT_REGISTERED") == 1
     scope = [e for e in captured.events if e.event_type.value == "SCOPE_ASSERTED"]
     assert [e.payload.tool_id for e in scope] == ["crm_fetch"]
+
+
+def test_plain_handler_defines_every_base_callback():
+    """Every callback BaseCallbackHandler defines exists on the plain handler,
+    so LangChain never logs an AttributeError for one it dispatches."""
+    callbacks = pytest.importorskip("langchain_core.callbacks")
+    _, handler = _make_handler()
+    names = [n for n in dir(callbacks.BaseCallbackHandler) if n.startswith("on_")]
+    assert [n for n in names if not hasattr(handler, n)] == []
