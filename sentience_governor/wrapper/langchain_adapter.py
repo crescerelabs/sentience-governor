@@ -165,6 +165,21 @@ class SentienceCallbackHandler:
     its concurrency story is unchanged and is documented on that class.
     """
 
+    # Duck-typing contract with LangChain's callback manager, which reads
+    # these from every handler (``langchain_core.callbacks.manager``), not
+    # only the ``on_*`` methods. Values match ``BaseCallbackHandler``.
+    # Without them a plain instance in ``config={"callbacks": [handler]}``
+    # raises AttributeError out of the governed application's invoke().
+    raise_error: bool = False
+    run_inline: bool = False
+    ignore_llm: bool = False
+    ignore_retry: bool = False
+    ignore_chain: bool = False
+    ignore_agent: bool = False
+    ignore_retriever: bool = False
+    ignore_chat_model: bool = False
+    ignore_custom_event: bool = False
+
     def __init__(
         self,
         agent_id: str,
@@ -374,6 +389,35 @@ class SentienceCallbackHandler:
 
             del self._roots[key]
             self._prune_ancestry(key)
+
+    def _ignore_callback(self, *args: Any, **kwargs: Any) -> None:
+        """Accept a LangChain callback this handler does not use.
+
+        ``BaseCallbackHandler`` defines every callback as a no-op; without
+        these the manager logs an ``AttributeError`` for each call (one per
+        streamed token for ``on_llm_new_token``).
+        """
+
+    on_llm_new_token = on_llm_error = _ignore_callback
+    on_chain_error = on_tool_error = on_text = on_retry = _ignore_callback
+    on_agent_action = on_agent_finish = _ignore_callback
+    on_retriever_start = on_retriever_end = on_retriever_error = _ignore_callback
+    on_custom_event = on_stream_event = _ignore_callback
+
+    def on_chat_model_start(
+        self,
+        serialized: Dict[str, Any],
+        messages: Any,
+        **kwargs: Any,
+    ) -> None:
+        """Defer to :meth:`on_llm_start`, as ``BaseCallbackHandler`` does.
+
+        LangChain treats ``NotImplementedError`` from this callback as "use
+        ``on_llm_start``" and calls it with the same ``run_id`` /
+        ``parent_run_id``, so chat models open the LLM turn exactly as
+        completion models do.
+        """
+        raise NotImplementedError
 
     def on_llm_start(
         self,
